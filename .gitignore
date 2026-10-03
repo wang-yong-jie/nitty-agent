@@ -1,0 +1,9 @@
+# 本地密钥不提交到 Git。
+.env
+.env.*
+!.env.example
+
+# Python 缓存和 PyCharm 的本地配置。
+__pycache__/
+*.pyc
+.idea/
