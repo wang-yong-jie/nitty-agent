@@ -36,10 +36,11 @@ User → Agent.run(task)
        ├── Agent Loop
        ├── AgentState / ContextBuilder
        ├── ModelAdapter → DeepSeek / OpenAI / Claude
-       └── ToolRegistry → ToolExecutor → Environment
-                              ▲             │
-                              └─ Observation┘
-                         反馈进入状态，下一轮继续决策
+       └── ToolRegistry → ToolExecutor
+                              ├── Environment（文件 / Shell）
+                              └── DesktopController（桌面）
+                     desktop_ask → VisionAdapter → VLM（分离模式）
+                    Observation → 状态 → 下一轮决策
 ```
 
 | 层 | 文件 | 职责 |
@@ -47,10 +48,12 @@ User → Agent.run(task)
 | Agent API | `agent.py` | `Agent.run(task)` 提交任务，返回最终回答 |
 | Runtime / Loop | `runtime.py` | 协调上下文、模型决策、工具执行和循环结束 |
 | State | `state.py` | 保存任务、历史、轮次、Observation、状态和最终回答 |
-| Context | `context.py` | 将指令、最新环境快照与历史组装为模型输入 |
+| Context | `context.py` | 收集工具附带的使用规则，将指令、环境快照与历史组装为模型输入 |
 | Model Adapter | `model.py` | 转换 OpenAI 兼容或 Claude 原生协议 |
-| Tool Registry / Executor | `tools.py` | 注册描述和处理函数，解析参数，调度并反馈错误 |
+| Vision Adapter | `vision.py` | 根据具体问题解释截图，校验结构化回答和目标坐标 |
+| Tool Registry / Executor | `tools.py` | 注册描述、使用规则和处理函数，解析参数，调度并反馈错误 |
 | Environment | `environment.py` | `LocalEnvironment` 负责本机路径、文件和 Shell 操作 |
+| Desktop | `desktop.py` / `desktop_tools.py` | Windows 截图、输入、坐标映射与桌面工具注册 |
 | 公共接口与数据 | `contracts.py` | 定义模型/环境接口及消息、调用、Observation |
 | 配置入口 | `main.py` | 读取配置和输入，将各模块装配起来 |
 
@@ -130,7 +133,7 @@ with OpenAI(
 ```
 
 每次 `run()` 创建独立任务历史；同一 Agent 的环境实例继续保留，可复用已有文件。
-`last_state.status` 分为 `running`、`completed`、`limit_reached`、`failed`。
+`last_state.status` 分为 `running`、`completed`、`limit_reached`、`failed`、`cancelled`。
 工具错误反馈给模型以便修正；模型通信失败与轮次耗尽会抛出异常，同时保留任务状态。
 调用方若需要完全独立的环境，可创建新的 Agent 和 Environment 实例。
 
@@ -145,7 +148,7 @@ with OpenAI(
 CLI 可通过 `--provider deepseek|openai|claude` 选择。
 OpenAI 使用 `OPENAI_API_KEY`，Claude 使用 `ANTHROPIC_API_KEY`；这两种模式须额外提供
 `--model "你的模型名称"`。可用 `--base-url` 配置服务地址。
-Claude 适配器支持文本与客户端工具调用，不启用思考、服务端工具或多模态。
+Claude 适配器支持文本、图片与客户端工具调用，不启用思考或服务端工具。
 DeepSeek 扩展参数不会发送给 OpenAI 或 Claude。
 
 **替换或新增工具**：用独立的注册表，或者向默认注册表追加能力：
@@ -161,17 +164,204 @@ registry.register(
     "greet", "向某人问好。",
     {"name": {"type": "string", "description": "姓名"}}, ["name"],
     handler=greet,
+    instructions="用户未提供姓名时先询问，不要猜测姓名。",
 )
 # 创建 Agent 时传入 registry，Runtime 无需修改。
 ```
+
+`instructions` 是可选的工具使用规则，保存在 `ToolSpec` 中，由 `ContextBuilder`
+按工具顺序收集；相同规则只加入一次。规则跟随传入上下文的工具定义，不按工具名称选择。
+工具组可为成员提供同一段规则，例如桌面工具的观察与操作约定。
+模型适配器只将名称、描述和参数定义转换为厂商工具协议，使用规则通过系统消息传递。
 
 **替换环境**：实现 `contracts.py` 中的 Environment 接口
 （`get_info / exec_command / read_file / write_file`），再传给 `Agent(environment=...)`。
 例如容器、远程或内存环境，既提供自己的环境快照，也负责实际操作。
 本机文件和 Shell 代码不会被 Runtime 隐式调用。
 
-本机环境目前提供 filesystem 和 shell；安装了 Git 时可通过命令使用 Git。
-图中的 browser、computer 等能力可通过新增工具和相应环境实现接入，目前未内置。
+本机环境提供 filesystem 和 shell；安装了 Git 时可通过命令使用 Git。
+可选桌面模式提供截图和鼠标键盘能力，可操作浏览器及其他 Windows 应用；没有内置 DOM 或 UI Automation 路由。
+
+## Windows 桌面与跨应用操作
+
+安装更新后的依赖，然后在已登录、解锁的 Windows 10/11 桌面中运行：
+
+```powershell
+conda run -n agent python -m pip install -r requirements.txt
+conda run --no-capture-output -n agent python main.py --desktop
+```
+
+PyCharm：项目解释器选 Conda `agent`，运行配置的**脚本参数**填写
+`--desktop --max-turns 60`，然后运行 `main.py`。
+启动后输入任务，例如：
+
+> 打开记事本，输入“你好，这是桌面 Agent 测试”，保存到桌面的 nitty-desktop-demo.txt，
+> 再打开文件管理器，确认该文件出现。若同名文件已存在，另取一个新名字。
+
+桌面模式默认使用 `direct`，提供 9 个桌面工具，默认最多 50 轮。
+`separate` 模式额外提供 `desktop_ask`，共 10 个桌面工具。
+要同时提供原来的文件和 Shell 工具，可加 `--with-local-tools`：
+
+```powershell
+conda run --no-capture-output -n agent python main.py --desktop --with-local-tools --max-turns 60
+```
+
+| 工具 | 用途 |
+| --- | --- |
+| `desktop_screenshot()` | 获取主屏幕截图、尺寸、前台窗口和 `frame_id` |
+| `desktop_click(frame_id, x, y, button="left", clicks=1)` | 单击、双击或右击 |
+| `desktop_move(frame_id, x, y)` | 鼠标悬停 |
+| `desktop_drag(frame_id, from_x, from_y, to_x, to_y, button="left", duration=0.5)` | 拖拽 |
+| `desktop_scroll(frame_id, x, y, amount)` | 在指定位置滚动；正数向上，负数向下 |
+| `desktop_press_key(frame_id, key)` | 功能键，例如 `enter`、`tab`、`esc` |
+| `desktop_hotkey(frame_id, keys)` | 组合键，例如 `["ctrl", "s"]`、`["alt", "tab"]` |
+| `desktop_type_text(frame_id, text)` | Unicode 文本、中文、换行，最多 2000 字符 |
+| `desktop_wait(seconds)` | 等待 0～10 秒并重新截图 |
+| `desktop_ask(question)` | 仅分离模式：重新截图并向 VLM 提出具体问题，返回文字观察、目标坐标和 `frame_id` |
+
+执行流程：`截图 → 模型选择一个动作 → 输入 → 等待界面响应 → 新截图 → 模型继续`。
+首次模型请求前先检查截图能否取得；检查失败会直接报错。
+默认动作后等待 0.4 秒；页面仍在加载时，模型可调用 `desktop_wait`。
+
+### 两种视觉模式
+
+**一体模式（默认）**：主模型需要支持图片和工具调用，直接理解截图并决定动作。
+
+```powershell
+conda run --no-capture-output -n agent python main.py --desktop --vision-mode direct
+```
+
+**分离模式**：主模型只需支持文本和工具调用；独立 VLM 负责回答截图问题。
+LLM 按需调用 `desktop_ask(question)`，例如“找到保存按钮，返回位置”或
+“检查是否保存成功，说明可见证据”。每次提问都会获取一张新截图，VLM 只接收本次问题和图片，
+不共享主模型的完整任务历史；需要前情时，LLM 应在问题中明确说明。
+普通截图、等待和动作不会自动调用 VLM，也不会自动生成泛泛的屏幕描述。
+
+```powershell
+conda run --no-capture-output -n agent python main.py --desktop --vision-mode separate --vision-model deepseek-flash
+```
+
+上例沿用默认 DeepSeek 提供方和现有密钥，为主模型与 VLM 分别创建适配器。
+主模型也可以通过 `--provider / --model / --base-url` 换成纯文本模型。
+PyCharm 的运行配置中填写相同脚本参数，例如：
+`--desktop --vision-mode separate --vision-model deepseek-flash`。
+
+| 分离模式配置 | 说明 |
+| --- | --- |
+| `--vision-provider` / `VISION_PROVIDER` | `deepseek`、`openai` 或 `claude`；未设置时与主模型提供方相同 |
+| `--vision-model` / `VISION_MODEL` | 必须明确指定支持图片输入的视觉模型名称 |
+| `--vision-base-url` / `VISION_BASE_URL` | 独立视觉服务地址；未设置时使用视觉提供方的默认地址，不继承主模型的自定义地址 |
+| `VISION_API_KEY` | 视觉服务密钥；未设置时使用视觉提供方对应的 `DEEPSEEK_API_KEY`、`OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY` |
+
+CLI 参数优先于相应环境变量；`.env.example` 包含可选视觉配置。
+自建 OpenAI 兼容 VLM 服务使用 `--vision-provider openai`、自己的服务地址和模型名称。
+`direct` 模式忽略 `.env` 中的可选视觉配置；显式传入视觉模型参数却未启用 `separate` 时会报错。
+两种模式不会自动切换或在请求失败时回退到另一提供方。
+
+分离模式的执行闭环是：
+`LLM 提出视觉问题 → 新截图 → VLM 回答 → LLM 选择动作 → 桌面工具执行 → 按需再次提问验证`。
+`TextOnlyModel` 在主模型边界移除所有标准图片附件；原始截图继续保留在任务状态中供调试。
+主模型接收的视觉反馈形如：
+
+```json
+{
+  "frame_id": "本次截图编号",
+  "image_width": 1600,
+  "image_height": 900,
+  "question": "找到保存按钮",
+  "vision": {
+    "status": "answered",
+    "answer": "保存按钮位于对话框右下方。",
+    "targets": [{"label": "保存", "x": 1200, "y": 700}]
+  }
+}
+```
+
+以上是结构示例，坐标不能直接用于真实操作。`frame_id` 和图片尺寸由控制器提供，不能由 VLM 伪造。
+`answered` 仅表示问题可回答，不等于任务完成；LLM 必须读取 `answer` 中的证据。
+未找到目标、目标有歧义、无法确定时分别返回 `not_found / ambiguous / uncertain`，这些状态不允许提供动作坐标。
+VLM 返回的坐标必须是截图范围内的整数；它不能发出工具调用，也不能直接控制桌面。
+视觉请求完成后会重新检查截图时效、前台窗口、屏幕尺寸及急停状态，失效结果不会交给 LLM 执行动作。
+任何新截图都会替换旧编号，之后不能继续使用旧视觉回答中的坐标。
+
+### 截图、输入与急停
+
+截图最长边默认缩放至 1600 像素，可用 `--screenshot-size 1920` 调整（640～3840）。
+模型的坐标始终基于**实际发送的图片尺寸**；控制器负责映射到物理屏幕坐标，
+并在 Windows 输入线程启用 Per-Monitor V2 DPI awareness。
+所有输入动作要求最新 `frame_id`。截图超过 120 秒、前台窗口变化、分辨率变化或编号过期时，
+拒绝输入并要求重新截图。动作开始后消费该编号，截图反馈失败也不会允许直接重放旧动作。
+同一轮若包含多个调用且其中有桌面工具，整批调用均不执行，反馈给模型逐次决策。
+
+底层使用 MSS 截图、PyAutoGUI 鼠标键盘操作；中文通过 Win32 `SendInput / KEYEVENTF_UNICODE`
+输入，不占用剪贴板。拖拽和组合键退出时会释放已按下的鼠标或键。
+F8 是全局急停键：一旦检测到就锁存，停止后续输入；若模型请求正在进行，会在请求返回后退出。
+终端 Ctrl+C 可中断当前运行；鼠标移至主屏幕角落也会在检查时触发急停。
+中止异常会穿过工具执行器，将任务标记为 `cancelled`，不会交给模型重试。
+
+第一版只支持主显示器上的可见界面，需要保持桌面解锁，操作期间避免人工同时输入。
+管理员窗口、UAC 安全桌面、锁屏、断开的远程桌面或特殊输入控件可能无法操作。
+输入返回成功只代表发送了事件，最终效果仍需模型通过截图确认。
+同一窗口内的弹窗、动画和布局变化也可能影响坐标，复杂跨应用任务仍需实际验收。
+
+### 图片与环境的接入方式
+
+- `register_desktop_tools(registry, desktop, vision=None)` 显式绑定 `DesktopController`；控制器为必填参数。
+  工具执行不读取 `environment.desktop`，可配合没有桌面属性的 Environment 使用。
+- 传入 `vision=ModelVisionAdapter(vlm_model)` 启用按需视觉工具；VLM 可复用任意支持图片的现有模型适配器。
+- 自定义视觉后端实现 `VisionAdapter.answer(question, image, width=..., height=...) → VisionAnswer`。
+  自定义桌面控制器须实现 `validate_frame(frame_id)`，用于视觉请求后的无输入复核。
+- `LocalEnvironment(desktop=desktop)` 仅将桌面信息纳入环境快照；CLI 将同一控制器传给环境和工具注册函数。
+- 桌面使用规则随工具注册，通用上下文模块不包含桌面工具名称判断；Runtime 不导入 Windows 库。
+- `ToolResult(data, images)` → `Observation.images` → `Message.images`，图片与 JSON 文本分开传递。
+- OpenAI 兼容适配器在整组 tool 结果之后追加带图片的 user 观察消息；Claude 放在对应 `tool_result` 内容块里。
+- `ContextBuilder(max_images=2)` 默认仅保留模型上下文中最近两张图片；分离模式在主模型边界继续移除这些附件。
+  原始状态保留本次任务全部观察供调试。
+- 图片保存在进程内存中，不自动保存到磁盘，也不把 Base64 内容打印到控制台。
+  一体模式将截图发送给主模型服务；分离模式仅在提问时将本次截图发送给视觉服务，文字观察返回主模型。
+
+一体模式的主模型需要支持视觉输入，参见 [DeepSeek 图像理解文档](https://api-docs.deepseek.com/guides/vision/)。
+分离模式中，主模型需要支持工具调用，VLM 需要支持图片输入和按要求输出 JSON，不要求 VLM 支持工具调用。
+其他底层参考：[MSS](https://python-mss.readthedocs.io/latest/usage.html)、
+[PyAutoGUI](https://pyautogui.readthedocs.io/en/latest/)、
+[Windows Unicode 输入](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-keybdinput)。
+
+Python API 中，桌面控制器的生命周期和急停检查由调用方接入：
+
+```python
+from desktop import WindowsDesktop
+from desktop_tools import register_desktop_tools
+from tools import ToolRegistry
+
+# model 使用前文已经配置好的支持图片输入的适配器。
+with WindowsDesktop() as desktop:
+    registry = ToolRegistry()
+    register_desktop_tools(registry, desktop)
+    agent = Agent(
+        model, registry, LocalEnvironment(desktop=desktop), max_turns=50,
+        cancel_check=desktop.check_cancelled,
+    )
+    print(agent.run("打开记事本并输入一段中文。"))
+```
+
+分离模式的 Python API：
+
+```python
+from model import TextOnlyModel
+from vision import ModelVisionAdapter
+
+# planner_model 与 vlm_model 是调用方分别创建并管理的模型适配器。
+with WindowsDesktop() as desktop:
+    registry = ToolRegistry()
+    register_desktop_tools(registry, desktop, vision=ModelVisionAdapter(vlm_model))
+    agent = Agent(
+        TextOnlyModel(planner_model), registry, LocalEnvironment(desktop=desktop),
+        max_turns=50, cancel_check=desktop.check_cancelled,
+    )
+    print(agent.run("找到保存按钮，保存后检查界面是否显示成功。"))
+```
+
+Python 调用方须搭配 `TextOnlyModel`，确保纯文本主模型不接收图片附件；CLI 会自动完成该装配。
 
 ## 本地验证
 
@@ -181,7 +371,21 @@ conda run --no-capture-output -n agent python -m unittest -v
 
 测试不联网，覆盖自定义模型和工具、内存环境替换、协议转换、错误恢复、
 状态隔离、动态环境上下文，以及本机目录、命令退出码、中文输出和超时处理。
-OpenAI/Claude 适配器使用模拟服务响应；实际联网验证使用已配置的 DeepSeek。
+桌面测试使用替身后端，不移动真实鼠标或向应用输入内容；覆盖缩放、过期观察、
+多调用拦截、图片历史裁剪、协议序列化、急停和输入释放。
+另覆盖桌面控制器显式绑定、工具规则随定义传递及共享规则去重。
+`test_vision.py` 覆盖纯文本主模型隔离、按需定位与验证、视觉结果校验、过期截图、
+VLM 请求期间急停、不同模型独立配置及两种模式的 CLI 装配。
+OpenAI/Claude 适配器使用模拟服务响应。
 
-当前实现为同步单 Agent，默认最多 10 轮；未实现交互式 Shell、自动加载 `AGENTS.md`、
+可单独运行真实 DeepSeek 图片协议验证（会产生少量 API 用量）：
+
+```powershell
+conda run --no-capture-output -n agent python -m examples.vision_smoke
+```
+
+该脚本生成一张随机六位数字的图片，要求模型先调用工具获取图片再识别，
+验证 `ToolResult → Runtime → ModelAdapter → DeepSeek` 全链路，不读取真实桌面。
+
+当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮；未实现交互式 Shell、自动加载 `AGENTS.md`、
 历史压缩或持久化恢复。文件和命令在本机以当前用户权限执行。

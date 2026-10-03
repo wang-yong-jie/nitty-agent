@@ -1,5 +1,7 @@
 """Agent API：供命令行、PyCharm 或其他 Python 程序调用的统一入口。"""
 
+from typing import Callable
+
 from context import ContextBuilder
 from contracts import Environment, ModelAdapter
 from runtime import AgentRuntime
@@ -13,8 +15,9 @@ class Agent:
     def __init__(
         self, model: ModelAdapter, registry: ToolRegistry, environment: Environment,
         context: ContextBuilder | None = None, max_turns: int = 10, verbose: bool = True,
+        cancel_check: Callable[[], None] | None = None,
     ):
-        self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose)
+        self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check)
 
     def run(self, task: str) -> str:
         """提交一个任务，返回最终回答；执行失败时抛出异常。"""

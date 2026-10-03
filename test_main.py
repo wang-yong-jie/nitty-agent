@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -21,6 +22,7 @@ from context import ContextBuilder
 from contracts import Message, ModelReply, ToolCall
 from environment import LocalEnvironment
 from model import ClaudeModel, OpenAICompatibleModel
+from state import AgentState
 from tools import ToolRegistry, create_default_registry
 
 
@@ -185,6 +187,46 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("TypeError", agent.last_state.observations[0].error)
 
 
+class ContextTests(unittest.TestCase):
+    def test_registered_rules_are_ordered_deduplicated_and_scoped(self):
+        registry = ToolRegistry()
+        for name, instructions in (
+            ("lookup", "查询前先确认数据来源。"),
+            ("lookup_more", "查询前先确认数据来源。"),
+            ("export", "导出时保留来源信息。"),
+        ):
+            registry.register(name, "测试工具", {}, [], lambda environment: None,
+                              instructions=instructions)
+        model = SequenceModel(ModelReply("已完成"))
+        Agent(model, registry, MemoryEnvironment(), verbose=False).run("测试规则")
+        system = model.requests[0][0][0].content
+        self.assertEqual(system.count("查询前先确认数据来源。"), 1)
+        self.assertEqual(system.count("导出时保留来源信息。"), 1)
+        self.assertLess(system.index("查询前"), system.index("导出时"))
+        scoped = ContextBuilder().build_messages(AgentState("task"), {}, registry.specs()[:2])
+        self.assertNotIn("导出时保留来源信息。", scoped[0].content)
+
+    def test_tool_names_do_not_select_instructions(self):
+        registry = ToolRegistry()
+        for name in ("exec_command", "read_file", "write_file", "desktop_screenshot"):
+            registry.register(name, "没有附加规则的自定义实现", {}, [], lambda environment: None)
+        context, state = ContextBuilder(), AgentState("task")
+        self.assertEqual(
+            context.build_messages(state, {}, registry.specs())[0].content,
+            context.build_messages(state, {}, [])[0].content,
+        )
+
+    def test_builtin_rules_survive_renaming(self):
+        specs = create_default_registry().specs()
+        renamed = [replace(spec, name=f"renamed_{index}") for index, spec in enumerate(specs)]
+        context, state = ContextBuilder(), AgentState("task")
+        original = context.build_messages(state, {}, specs)[0].content
+        self.assertEqual(original, context.build_messages(state, {}, renamed)[0].content)
+        for spec in specs:
+            self.assertTrue(spec.instructions)
+            self.assertIn(spec.instructions, original)
+
+
 class ModelAdapterTests(unittest.TestCase):
     def test_openai_messages_calls_and_extensions(self):
         """统一消息和工具描述转成 SDK 格式，响应调用转成公共类型。"""
@@ -202,6 +244,7 @@ class ModelAdapterTests(unittest.TestCase):
         request = client.chat.completions.create.call_args.kwargs
         self.assertEqual(request["messages"][-1]["tool_call_id"], "old")
         self.assertEqual(request["tools"][0]["function"]["name"], "exec_command")
+        self.assertEqual(set(request["tools"][0]["function"]), {"name", "description", "parameters"})
         self.assertEqual(reply.tool_calls[0].id, "new")
         self.assertEqual(json.loads(reply.tool_calls[0].arguments), {"path": "note.txt"})
         self.assertIn("extra_body", request)
@@ -242,6 +285,7 @@ class ModelAdapterTests(unittest.TestCase):
             self.assertEqual(agent.run("读取两个文件"), "已检查")
         self.assertTrue(bodies[0]["system"])
         self.assertIn("input_schema", bodies[0]["tools"][0])
+        self.assertEqual(set(bodies[0]["tools"][0]), {"name", "description", "input_schema"})
         results = bodies[1]["messages"][-1]
         self.assertEqual(results["role"], "user")
         self.assertEqual([b["tool_use_id"] for b in results["content"]], ["good", "bad"])

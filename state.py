@@ -14,6 +14,6 @@ class AgentState:
     messages: list[Message] = field(default_factory=list)
     observations: list[Observation] = field(default_factory=list)
     turn: int = 0
-    status: Literal["running", "completed", "limit_reached", "failed"] = "running"
+    status: Literal["running", "completed", "limit_reached", "failed", "cancelled"] = "running"
     answer: str | None = None
     error: str | None = None

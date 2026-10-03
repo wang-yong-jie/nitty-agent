@@ -9,11 +9,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from contracts import DesktopController
+
 
 class LocalEnvironment:
     """默认 Environment 实现；实际操作都在这里，不依赖模型或 Agent Loop。"""
 
-    def __init__(self, workdir: str | Path | None = None):
+    def __init__(self, workdir: str | Path | None = None, *, desktop: DesktopController | None = None):
+        # 仅用于 get_info 的桌面快照；桌面工具在注册时单独绑定控制器。
+        self.desktop = desktop
         # 工作目录属于环境实例；未指定时不会提前创建临时目录。
         self.working_directory: Path | None = None
         if workdir is not None:
@@ -36,7 +40,7 @@ class LocalEnvironment:
                     desktop = Path(os.path.expandvars(winreg.QueryValueEx(key, "Desktop")[0]))
             except OSError:
                 pass  # 未登记时使用用户主目录下的 Desktop。
-        return {
+        info = {
             "system": platform.system(),
             "shell": "PowerShell" if os.name == "nt" else "/bin/sh",
             "home_directory": str(Path.home()),
@@ -46,6 +50,9 @@ class LocalEnvironment:
             "python_policy": "命令 PATH 优先使用当前 Agent 的 Python 环境，python 命令使用 python_executable。",
             "path_policy": "工作目录不是访问边界；绝对路径直接访问，相对路径按工作目录解析。未指定时按需创建并保留临时目录。桌面位置使用 desktop_directory。",
         }
+        if self.desktop is not None:
+            info["desktop"] = self.desktop.get_info()
+        return info
 
     def get_working_directory(self) -> Path:
         """需要默认工作目录时才创建一次临时目录，本次任务的工具共用它。"""
