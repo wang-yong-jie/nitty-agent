@@ -1,7 +1,7 @@
 """应用查询工具：仅依赖显式传入的应用目录，不依赖桌面或 Shell 工具名称。"""
 
 from validation import validate_app_name
-from contracts import ApplicationCatalog
+from contracts import ApplicationCatalog, ToolRejected
 from core.tooling import ToolRegistry
 
 
@@ -21,7 +21,11 @@ def register_application_tools(registry: ToolRegistry, catalog: ApplicationCatal
         raise ValueError("注册应用查询工具必须提供 ApplicationCatalog。")
 
     def find(_environment, name: str):
-        return catalog.find(validate_app_name(name))
+        try:
+            name = validate_app_name(name)
+        except ValueError as error:
+            raise ToolRejected("INVALID_ARGUMENTS", str(error)) from error
+        return catalog.find(name)
 
     registry.register(
         "app_find", "只读查询 Windows 应用注册、AppX 包、快捷方式和安装信息；返回候选及检查范围，不启动应用。",

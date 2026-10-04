@@ -168,6 +168,7 @@ with OpenAI(
     model = OpenAICompatibleModel(
         client, "deepseek-flash",
         extra_body={"thinking": {"type": "disabled"}},
+        provider="deepseek",
     )
     agent = Agent(
         model=model,
@@ -183,6 +184,9 @@ with OpenAI(
 
 每次 `run()` 创建独立任务历史；同一 Agent 的环境实例继续保留，可复用已有文件。
 `last_state.status` 分为 `running`、`completed`、`limit_reached`、`failed`、`cancelled`。
+`last_state.run_id` 可对应日志中的运行；`stop_reason` 分为 `model_answer`、`turn_limit`、
+`run_failure`、`user_cancelled`、`trace_failure`。`error_info` 提供运行错误的分类和阶段，
+`trace_errors` 保存本次运行中已脱敏的日志接收器错误。
 工具错误反馈给模型以便修正；模型通信失败与轮次耗尽会抛出异常，同时保留任务状态。
 调用方若需要完全独立的环境，可创建新的 Agent 和 Environment 实例。
 
@@ -199,6 +203,11 @@ OpenAI 使用 `OPENAI_API_KEY`，Claude 使用 `ANTHROPIC_API_KEY`；这两种�
 `--model "你的模型名称"`。可用 `--base-url` 配置服务地址。
 Claude 适配器支持文本、图片与客户端工具调用，不启用思考或服务端工具。
 DeepSeek 扩展参数不会发送给 OpenAI 或 Claude。
+
+适配器可选提供 `get_info() → dict`，用于记录非敏感模型配置；未实现时仅记录适配器类名。
+`ModelReply.metadata` 可携带 `ModelMetadata`（提供方、模型名、结束原因、请求/响应 ID 和用量计数），
+不改变 `generate` 接口。内置适配器会提取响应中可用的字段；截断错误也携带诊断元数据。
+缺失字段保留为空，不伪造请求 ID 或用量；SDK 内部重试次数不单独统计。
 
 **替换或新增工具**：用独立的注册表，或者向默认注册表追加能力：
 
@@ -222,6 +231,45 @@ registry.register(
 按工具顺序收集；相同规则只加入一次。规则跟随传入上下文的工具定义，不按工具名称选择。
 工具组可为成员提供同一段规则，例如桌面工具的观察与操作约定。
 模型适配器只将名称、描述和参数定义转换为厂商工具协议，使用规则通过系统消息传递。
+
+工具参数在调用处理函数前统一按 JSON Schema Draft 2020-12 校验（使用 `jsonschema`）。
+支持必填项、额外字段拒绝、嵌套对象和数组、枚举、类型及长度/数值范围；不隐式转换参数类型。
+`integer` 使用严格 Python 整数，不接受布尔值或 `1.0`；JSON 中的 NaN、Infinity 和溢出数字也会拒绝。
+注册时检查 Schema 的合法性，工具描述以副本提供给模型上下文，避免外部修改影响校验定义。
+本地 Schema 片段引用可用，远程 `$ref` 不自动联网获取。`format` 不默认启用额外格式校验。
+文件路径、截图时效等业务条件继续由工具或适配器检查。
+
+每条 `Observation` 保留原有 `error` 字符串，并增加 `status`、`executed` 和 `error_info`。
+错误反馈给模型时也包含同一份结构化 `error_info`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `status` | `rejected` 调用被拒绝；`succeeded` 正常返回；`failed` 执行或结果处理失败；`cancelled` 用户中止 |
+| `executed` | 是否进入处理函数调用。通用参数校验失败为 false；处理函数内的业务校验拒绝可能为 true |
+| `error_info.code` | 稳定错误代码，如 `UNKNOWN_TOOL`、`INVALID_JSON`、`INVALID_ARGUMENTS`、`BATCH_REJECTED`、`STALE_FRAME`、`EXECUTION_FAILED`、`INVALID_RESULT` |
+| `error_info.phase` | 出错阶段，例如 `validation`、`execution`、`result` |
+| `error_info.message` | 可阅读的原因；日志中按现有规则脱敏 |
+| `error_info.side_effects` | 本次失败调用是否可能产生副作用：`none` 或 `possible`。possible 不代表一定执行了操作 |
+| `error_info.exception_type` | 可用时保存异常类型，辅助诊断 |
+
+`succeeded` 只表示工具正常返回。例如 Shell 返回退出码 1，或应用查询返回 incomplete，
+仍是成功取得反馈；命令/业务是否完成要读取结果。不可序列化的结果即使在操作之后才发现，
+也会标记为 `failed / INVALID_RESULT / side_effects=possible`，不能当作未执行。
+
+自定义工具可显式声明失败性质：
+
+```python
+from contracts import ToolRejected, ToolExecutionError
+
+# 在尚未产生副作用的业务校验处使用：
+raise ToolRejected("STALE_FRAME", "截图已失效，请重新观察。")
+
+# 动作可能已发送，但后续验证失败时使用：
+raise ToolExecutionError("POST_ACTION_CAPTURE_FAILED", "动作已发送，后续截图失败。", phase="result")
+```
+
+未经分类的处理函数异常保守标记为 `EXECUTION_FAILED / side_effects=possible`。
+桌面适配器已为过期截图、动作失败和动作后截图失败提供明确分类。
 
 **替换环境**：实现 `contracts.py` 中的 Environment 接口
 （`get_info / exec_command / read_file / write_file`），再传给 `Agent(environment=...)`。
@@ -318,8 +366,59 @@ conda run --no-capture-output -n agent python main.py --desktop --with-local-too
 
 在 PyCharm 的脚本参数中填写相同选项即可。相对日志路径以启动目录为基准，与 `--workdir` 分开；
 文件独占新建，不覆盖已有日志。每条 JSONL 事件立即写入，包含运行 ID、时间、轮次、调用 ID、参数、
-结果和耗时；取消、拒绝执行的批次及运行失败有独立标记。模型事件仅记录调用时间及工具数量，
+结果和耗时；取消、拒绝执行的批次及运行失败有独立标记。主模型事件记录结束原因、可用请求 ID、
+用量计数和耗时，
 不保存完整提示词、用户任务或推理内容。`completed` 表示模型已结束本轮任务，不能视为业务目标经外部验证成功。
+
+事件使用 `schema_version=2`，并带本次运行内递增的 `sequence`。主要事件如下：
+
+| 事件 | 用途 |
+| --- | --- |
+| `run_started` / `model_configured` | 运行模式、工具列表、轮次上限、适配器和非敏感模型配置 |
+| `context_built` | 每轮实际环境快照、工作目录、消息与图片数量，不包含完整历史 |
+| `model_started` / `model_finished` | 主模型调用边界、耗时、工具调用数和响应元数据 |
+| `model_failed` / `model_cancelled` | 主模型失败或取消，不再将该请求记录为正常完成 |
+| `tool_started` | 收到一次调用及脱敏参数；此时尚不能断言处理函数已执行 |
+| `tool_execution_started` | 通用校验通过，准备进入处理函数；严格日志模式写入失败时不会执行 |
+| `tool_finished` | status、executed、结果或结构化错误；拒绝批次也为每个调用保留对应结果 |
+| `tool_cancelled` | 执行中取消及是否可能产生副作用；保留 Observation，不交给模型重试 |
+| `run_failed` / `run_finished` | 运行失败阶段、最终状态、stop_reason、总耗时和日志故障数量 |
+
+例如动作发出后截图失败，`tool_finished` 会包含：
+
+```json
+{
+  "status": "failed",
+  "executed": true,
+  "error_info": {
+    "code": "POST_ACTION_CAPTURE_FAILED",
+    "phase": "result",
+    "message": "动作已发送，但后续截图失败；先重新截图，不要重复动作。",
+    "side_effects": "possible",
+    "exception_type": "OSError"
+  }
+}
+```
+
+排查时先按 `run_id` 和 `sequence` 查看事件，再定位对应 `turn / call_id`。
+`executed=false` 表示未进入处理函数；`executed=true` 仍需结合 status、side_effects 和结果判断。
+分离模式的 VLM 请求仍属于 `desktop_ask` 工具执行，耗时和错误体现在该工具事件中，
+目前不单独生成 VLM 请求事件。
+
+默认情况下，运行中的日志接收器写入失败会向 stderr 报告一次，停用该接收器并继续任务；
+控制台工具日志继续输出，故障保存在 `last_state.trace_errors`。下次 run 会重新尝试接收器。
+追踪文件创建失败（包括同名文件存在）仍在启动阶段报错；文件关闭阶段的清理错误只报告告警。
+需要每个执行边界都有日志才能继续时，启用严格模式：
+
+```powershell
+conda run --no-capture-output -n agent python main.py --trace-file .agent-logs/strict-run-01.jsonl --trace-strict
+```
+
+PyCharm 的脚本参数可填写相同选项。Python API 使用 `Agent(..., trace=trace, trace_strict=True)`，
+并可通过 `run_config={"mode": "custom"}` 提供非敏感运行配置。
+严格模式在正常路径的事件写入失败时抛出 `TraceWriteError` 并停止后续操作；已有执行结果仍留在状态里。
+如果任务已经发生模型错误或用户取消，失败/结束事件的日志错误不会覆盖原始异常。
+磁盘故障后无法保证后续 JSONL 完整，需同时查看控制台告警或 `last_state`。
 
 控制台和 JSONL 共用脱敏逻辑：遮蔽已知环境凭证、常见密码/令牌字段及赋值；
 `desktop_type_text.text` 和 `write_file.content` 默认全部遮蔽。图片仅记录类型和编码长度。
@@ -485,6 +584,8 @@ conda run --no-capture-output -n agent python -m unittest discover -s tests -t .
 `tests/test_vision.py` 覆盖纯文本主模型隔离、按需定位与验证、视觉结果校验、过期截图、
 VLM 请求期间急停、不同模型独立配置及两种模式的 CLI 装配。
 OpenAI/Claude 适配器使用模拟服务响应。
+`tests/test_tooling.py` 覆盖通用 Schema 校验、拒绝执行、业务拒绝与结果序列化失败；
+`tests/test_runtime_events.py` 从 JSONL 验证错误分类、部分桌面动作、模型诊断和日志故障策略。
 单独运行一组测试，例如 `conda run --no-capture-output -n agent python -m unittest tests.test_vision -v`。
 在 PyCharm 中也可为 `tests` 目录创建 unittest 运行配置，工作目录设为项目根目录。
 

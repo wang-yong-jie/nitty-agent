@@ -17,8 +17,11 @@ class Agent:
         context: ContextBuilder | None = None, max_turns: int = 10, verbose: bool = True,
         cancel_check: Callable[[], None] | None = None,
         trace: EventSink | None = None,
+        trace_strict: bool = False,
+        run_config: dict | None = None,
     ):
-        self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check, trace)
+        self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check, trace,
+                                    trace_strict=trace_strict, run_config=run_config)
 
     def run(self, task: str) -> str:
         """提交一个任务，返回最终回答；执行失败时抛出异常。"""

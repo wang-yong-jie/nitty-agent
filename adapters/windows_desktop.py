@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from io import BytesIO
 
-from contracts import AgentCancelled, ImageContent, ToolResult
+from contracts import AgentCancelled, ImageContent, ToolExecutionError, ToolRejected, ToolResult
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class Frame:
     def point(self, x: int, y: int) -> tuple[int, int]:
         width, height = self.image_size
         if type(x) is not int or type(y) is not int or not (0 <= x < width and 0 <= y < height):
-            raise ValueError(f"坐标必须是截图范围内的整数：0 <= x < {width}，0 <= y < {height}。")
+            raise ToolRejected("INVALID_ARGUMENTS", f"坐标必须是截图范围内的整数：0 <= x < {width}，0 <= y < {height}。")
         left, top, native_width, native_height = self.geometry
         return (
             left + min(native_width - 1, round(x * native_width / width)),
@@ -34,7 +34,7 @@ class Frame:
 
 def bounded_number(value, name, minimum, maximum):
     if type(value) not in {int, float} or not math.isfinite(value) or not minimum <= value <= maximum:
-        raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间。")
+        raise ToolRejected("INVALID_ARGUMENTS", f"{name} 必须在 {minimum} 到 {maximum} 之间。")
     return value
 
 
@@ -105,11 +105,11 @@ class WindowsDesktop:
         self.check_cancelled()
         frame = self.frame
         if frame is None or frame.id != frame_id:
-            raise ValueError("frame_id 已过期或尚未截图，请先调用 desktop_screenshot。")
+            raise ToolRejected("STALE_FRAME", "frame_id 已过期或尚未截图，请先调用 desktop_screenshot。")
         if (time.monotonic() - frame.captured_at > 120 or self.backend.geometry() != frame.geometry
                 or self.backend.foreground()["handle"] != frame.window):
             self.frame = None
-            raise ValueError("截图已过时，或显示设置/前台窗口已变化，请重新截图。")
+            raise ToolRejected("STALE_FRAME", "截图已过时，或显示设置/前台窗口已变化，请重新截图。")
         return frame
 
     def _wait(self, seconds):
@@ -130,14 +130,15 @@ class WindowsDesktop:
         except AgentCancelled:
             raise
         except Exception as error:
-            raise RuntimeError(f"动作可能已部分执行，请先重新截图，不要直接重试：{error}") from error
+            raise ToolExecutionError("ACTION_FAILED", f"动作可能已部分执行，请先重新截图，不要直接重试：{error}") from error
         self._wait(self.settle_seconds)
         try:
             result = self.screenshot()
         except AgentCancelled:
             raise
         except Exception as error:
-            raise RuntimeError(f"动作已发送，但后续截图失败；先重新截图，不要重复动作：{error}") from error
+            raise ToolExecutionError("POST_ACTION_CAPTURE_FAILED", f"动作已发送，但后续截图失败；先重新截图，不要重复动作：{error}",
+                                     phase="result") from error
         result.data["action"] = action
         result.data["input_sent"] = True
         return result
@@ -145,25 +146,25 @@ class WindowsDesktop:
     @staticmethod
     def _button(button):
         if button not in ("left", "right", "middle"):
-            raise ValueError("button 只能是 left、right 或 middle。")
+            raise ToolRejected("INVALID_ARGUMENTS", "button 只能是 left、right 或 middle。")
         return button
 
     def _keys(self, keys):
         if not isinstance(keys, list) or not 1 <= len(keys) <= 4:
-            raise ValueError("keys 必须是包含 1 到 4 个键名的数组。")
+            raise ToolRejected("INVALID_ARGUMENTS", "keys 必须是包含 1 到 4 个键名的数组。")
         if any(not isinstance(key, str) for key in keys):
-            raise ValueError("键名必须是字符串。")
+            raise ToolRejected("INVALID_ARGUMENTS", "键名必须是字符串。")
         keys = [key.lower() for key in keys]
         if any(key == "f8" or key not in self.backend.key_names for key in keys):
-            raise ValueError("键名无效，或使用了保留的急停键 F8。")
+            raise ToolRejected("INVALID_ARGUMENTS", "键名无效，或使用了保留的急停键 F8。")
         if len(set(keys)) != len(keys):
-            raise ValueError("组合键不能重复。")
+            raise ToolRejected("INVALID_ARGUMENTS", "组合键不能重复。")
         return keys
 
     def _click(self, frame_id, x, y, button="left", clicks=1):
         point = self._current(frame_id).point(x, y)
         if type(clicks) is not int or clicks not in (1, 2):
-            raise ValueError("clicks 只能是 1 或 2。")
+            raise ToolRejected("INVALID_ARGUMENTS", "clicks 只能是 1 或 2。")
         return self._act(frame_id, "click", x=point[0], y=point[1], button=self._button(button), clicks=clicks)
 
     def _move(self, frame_id, x, y):
@@ -178,7 +179,7 @@ class WindowsDesktop:
     def _scroll(self, frame_id, x, y, amount):
         point = self._current(frame_id).point(x, y)
         if type(amount) is not int or not -20 <= amount <= 20 or amount == 0:
-            raise ValueError("amount 必须是 -20 到 20 之间的非零整数。")
+            raise ToolRejected("INVALID_ARGUMENTS", "amount 必须是 -20 到 20 之间的非零整数。")
         return self._act(frame_id, "scroll", x=point[0], y=point[1], amount=amount)
 
     def _press_key(self, frame_id, key):
@@ -189,10 +190,10 @@ class WindowsDesktop:
 
     def _type_text(self, frame_id, text):
         if not isinstance(text, str) or not 1 <= len(text) <= 2000:
-            raise ValueError("text 必须是 1 到 2000 字符的文本。")
+            raise ToolRejected("INVALID_ARGUMENTS", "text 必须是 1 到 2000 字符的文本。")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         if any((ord(c) < 32 and c not in "\n\t") or 0xD800 <= ord(c) <= 0xDFFF for c in text):
-            raise ValueError("文本包含不支持的控制字符或无效 Unicode。")
+            raise ToolRejected("INVALID_ARGUMENTS", "文本包含不支持的控制字符或无效 Unicode。")
         return self._act(frame_id, "text", text=text)
 
     def _wait_and_capture(self, seconds):

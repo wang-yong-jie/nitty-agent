@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from contracts import DesktopController
+from contracts import DesktopController, ToolRejected
 
 
 class LocalEnvironment:
@@ -85,9 +85,9 @@ class LocalEnvironment:
     def exec_command(self, cmd: str, workdir: str | None = None, timeout: int = 30) -> dict:
         """执行一条 Shell 命令，支持创建目录、列目录、运行程序和测试。"""
         if not cmd.strip():
-            raise ValueError("命令不能为空。")
+            raise ToolRejected("INVALID_ARGUMENTS", "命令不能为空。")
         if type(timeout) is not int or not 1 <= timeout <= 300:
-            raise ValueError("timeout 必须是 1 到 300 之间的整数秒数。")
+            raise ToolRejected("INVALID_ARGUMENTS", "timeout 必须是 1 到 300 之间的整数秒数。")
         # 单次调用可以指定已有目录，不改变其他工具的默认工作目录。
         # 绝对 workdir 不需要临时目录；省略时按需创建并复用默认目录。
         directory = self.resolve_path(workdir) if workdir is not None else self.get_working_directory()

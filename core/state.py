@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from contracts import Message, Observation
+from contracts import ErrorInfo, Message, Observation
 
 
 @dataclass
@@ -17,3 +17,7 @@ class AgentState:
     status: Literal["running", "completed", "limit_reached", "failed", "cancelled"] = "running"
     answer: str | None = None
     error: str | None = None
+    error_info: ErrorInfo | None = None
+    stop_reason: str | None = None
+    trace_errors: list[str] = field(default_factory=list)
+    run_id: str | None = None

@@ -9,6 +9,19 @@ from PIL import Image
 from contracts import AgentCancelled, ToolCall
 
 
+class MemoryTrace:
+    """保存成功写入的事件，可按事件名模拟日志接收器故障。"""
+
+    def __init__(self, fail_on=()):
+        self.events = []
+        self.fail_on = set(fail_on)
+
+    def emit(self, event):
+        if event["event"] in self.fail_on:
+            raise OSError("模拟日志写入失败")
+        self.events.append(copy.deepcopy(event))
+
+
 class SequenceModel:
     """完全不依赖厂商 SDK 的测试模型，证明 Runtime 可以替换 Model。"""
 
@@ -19,7 +32,7 @@ class SequenceModel:
     def generate(self, messages, tools):
         self.requests.append(copy.deepcopy((messages, tools)))
         reply = next(self.replies)
-        if isinstance(reply, Exception):
+        if isinstance(reply, BaseException):
             raise reply
         return reply
 

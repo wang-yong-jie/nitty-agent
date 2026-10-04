@@ -183,7 +183,10 @@ class DesktopVisionTests(unittest.TestCase):
     def test_invalid_questions_do_not_capture_or_call_vision(self):
         for question in (None, 42, "", "  ", "x" * 2001):
             with self.subTest(question=str(question)[:20]):
-                self.assertIn("视觉问题", self.ask(question).error)
+                result = self.ask(question)
+                self.assertEqual(result.status, "rejected")
+                self.assertEqual(result.error_info.code, "INVALID_ARGUMENTS")
+                self.assertEqual(result.error_info.side_effects, "none")
         self.assertIsNone(self.desktop.frame)
         self.vision.answer.assert_not_called()
 

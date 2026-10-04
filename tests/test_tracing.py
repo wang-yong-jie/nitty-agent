@@ -3,29 +3,31 @@
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import cli as main
 from core.agent import Agent
 from contracts import AgentCancelled, ImageContent, ModelReply, ToolCall, ToolResult
-from tests.fakes import MemoryEnvironment, SequenceModel, call
+from tests.fakes import MemoryEnvironment, MemoryTrace, SequenceModel, call
 from core.tooling import ToolRegistry
 from tools.local import create_default_registry
 from tracing import JsonlTrace, LogRedactor
 
 
-class MemoryTrace:
-    def __init__(self):
-        self.events = []
-
-    def emit(self, event):
-        self.events.append(event)
-
-
 class TracingTests(unittest.TestCase):
+    def test_close_failure_does_not_replace_task_exception(self):
+        trace = JsonlTrace("unused.jsonl")
+        trace.file = Mock()
+        trace.file.close.side_effect = OSError("关闭失败")
+        stderr = StringIO()
+        primary = ConnectionError("模型失败")
+        with redirect_stderr(stderr):
+            trace.__exit__(type(primary), primary, None)
+        self.assertIn("[日志故障]", stderr.getvalue())
+
     def test_command_arguments_duration_and_timeout_are_logged_without_changing_feedback(self):
         env, trace = MemoryEnvironment(), MemoryTrace()
         command = "Write-Output '中文'; tool --password 'inline-secret'"
@@ -54,7 +56,7 @@ class TracingTests(unittest.TestCase):
         def input_text(_env, text):
             received.append(text)
             return ToolResult({"input_sent": True, "echo": text}, [ImageContent("private-base64")])
-        registry.register("custom_input", "input", {}, [], input_text, sensitive_parameters=("text",))
+        registry.register("custom_input", "input", {"text": {"type": "string"}}, ["text"], input_text, sensitive_parameters=("text",))
         model = SequenceModel(ModelReply(tool_calls=[call("input", "custom_input", {"text": "private-message"})]), ModelReply("done"))
         agent = Agent(model, registry, MemoryEnvironment(), verbose=False, trace=trace)
         agent.run("input")

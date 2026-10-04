@@ -17,7 +17,7 @@ import cli as main
 from tests.fakes import MemoryEnvironment, SequenceModel, call, sdk_response
 from core.agent import Agent
 from core.context import ContextBuilder
-from contracts import Message, ModelReply, ToolCall
+from contracts import Message, ModelReply, ModelResponseError, ToolCall
 from adapters.local import LocalEnvironment
 from adapters.models import ClaudeModel, OpenAICompatibleModel
 from core.state import AgentState
@@ -171,6 +171,39 @@ class ContextTests(unittest.TestCase):
 
 
 class ModelAdapterTests(unittest.TestCase):
+    def test_openai_response_metadata_and_truncation_diagnostics(self):
+        response = sdk_response(content="完成")
+        response = response.model_copy(update={"usage": None})
+        # SDK 为真实响应附加请求 ID；在离线响应中模拟这个公开诊断属性。
+        response._request_id = "request-123"
+        from openai.types.completion_usage import CompletionUsage
+        response.usage = CompletionUsage(prompt_tokens=12, completion_tokens=3, total_tokens=15)
+        client = Mock()
+        client.chat.completions.create.return_value = response
+        adapter = OpenAICompatibleModel(client, "requested-model", provider="deepseek")
+        reply = adapter.generate([Message("user", "任务")], [])
+        self.assertEqual(reply.metadata.provider, "deepseek")
+        self.assertEqual(reply.metadata.request_id, "request-123")
+        self.assertEqual(reply.metadata.model, "test-model")
+        self.assertEqual(reply.metadata.usage["total_tokens"], 15)
+        response.choices[0].finish_reason = "length"
+        with self.assertRaises(ModelResponseError) as caught:
+            adapter.generate([Message("user", "任务")], [])
+        self.assertEqual(caught.exception.code, "MODEL_OUTPUT_TRUNCATED")
+        self.assertEqual(caught.exception.metadata.finish_reason, "length")
+
+    def test_claude_response_metadata(self):
+        body = {"id": "response-1", "model": "actual-model", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 8, "output_tokens": 2}, "content": [{"type": "text", "text": "完成"}]}
+        response = BytesIO(json.dumps(body).encode())
+        response.headers = {"request-id": "request-1"}
+        with patch("adapters.models.urlopen", return_value=response):
+            reply = ClaudeModel("key", "requested-model").generate([Message("user", "任务")], [])
+        self.assertEqual(reply.metadata.request_id, "request-1")
+        self.assertEqual(reply.metadata.response_id, "response-1")
+        self.assertEqual(reply.metadata.model, "actual-model")
+        self.assertEqual(reply.metadata.usage, {"input_tokens": 8, "output_tokens": 2})
+
     def test_openai_messages_calls_and_extensions(self):
         """统一消息和工具描述转成 SDK 格式，响应调用转成公共类型。"""
         client = Mock()

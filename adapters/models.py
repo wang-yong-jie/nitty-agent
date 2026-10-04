@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from urllib.request import Request, urlopen
 
-from contracts import Message, ModelAdapter, ModelReply, ToolCall, ToolSpec
+from contracts import Message, ModelAdapter, ModelMetadata, ModelReply, ModelResponseError, ToolCall, ToolSpec
 
 
 class TextOnlyModel:
@@ -16,16 +16,24 @@ class TextOnlyModel:
     def generate(self, messages: list[Message], tools: list[ToolSpec]) -> ModelReply:
         return self.delegate.generate([replace(message, images=[]) for message in messages], tools)
 
+    def get_info(self) -> dict:
+        getter = getattr(self.delegate, "get_info", None)
+        return {**(getter() if callable(getter) else {"adapter": type(self.delegate).__name__}), "input_images": False}
+
 
 class OpenAICompatibleModel:
     """支持 DeepSeek 和 OpenAI 兼容 Chat Completions 服务，客户端由入口配置。"""
 
-    def __init__(self, client, model: str, max_tokens: int = 4096, extra_body: dict | None = None):
+    def __init__(self, client, model: str, max_tokens: int = 4096, extra_body: dict | None = None, *, provider: str = "openai"):
         self.client = client
         self.model = model
         self.max_tokens = max_tokens
         # 厂商扩展参数只在适配器中处理，不能写进通用循环。
         self.extra_body = extra_body
+        self.provider = provider
+
+    def get_info(self) -> dict:
+        return {"adapter": type(self).__name__, "provider": self.provider, "model": self.model, "max_tokens": self.max_tokens}
 
     def generate(self, messages: list[Message], tools: list[ToolSpec]) -> ModelReply:
         """把统一消息转为 OpenAI 格式，再把响应转回统一决策。"""
@@ -67,14 +75,20 @@ class OpenAICompatibleModel:
             }} for tool in tools]
         if self.extra_body is not None:
             request["extra_body"] = self.extra_body
-        choice = self.client.chat.completions.create(**request).choices[0]
+        response = self.client.chat.completions.create(**request)
+        choice = response.choices[0]
+        usage = response.usage.model_dump() if response.usage is not None else {}
+        metadata = ModelMetadata(
+            self.provider, response.model, choice.finish_reason, getattr(response, "_request_id", None), response.id,
+            {key: value for key, value in usage.items() if type(value) is int},
+        )
         if choice.finish_reason == "length":
-            raise RuntimeError("模型输出被截断，请增大 max_tokens 后重试。")
+            raise ModelResponseError("MODEL_OUTPUT_TRUNCATED", "模型输出被截断，请增大 max_tokens 后重试。", metadata)
         message = choice.message
         return ModelReply(message.content, [
             ToolCall(call.id, call.function.name, call.function.arguments)
             for call in message.tool_calls or []
-        ])
+        ], metadata=metadata)
 
 
 class ClaudeModel:
@@ -89,6 +103,9 @@ class ClaudeModel:
         self.base_url = base_url.rstrip("/")
         self.max_tokens = max_tokens
         self.timeout = timeout
+
+    def get_info(self) -> dict:
+        return {"adapter": type(self).__name__, "provider": "claude", "model": self.model, "max_tokens": self.max_tokens}
 
     def generate(self, messages: list[Message], tools: list[ToolSpec]) -> ModelReply:
         """Claude 将工具结果放进 user 内容块；这个差异不进入 Runtime。"""
@@ -141,11 +158,17 @@ class ClaudeModel:
         )
         with urlopen(request, timeout=self.timeout) as response:
             data = json.load(response)
+            headers = getattr(response, "headers", {})
+            request_id = headers.get("request-id")
+        metadata = ModelMetadata(
+            "claude", data.get("model", self.model), data.get("stop_reason"), request_id, data.get("id"),
+            {key: value for key, value in data.get("usage", {}).items() if type(value) is int},
+        )
         if data.get("stop_reason") == "max_tokens":
-            raise RuntimeError("模型输出被截断，请增大 max_tokens 后重试。")
+            raise ModelResponseError("MODEL_OUTPUT_TRUNCATED", "模型输出被截断，请增大 max_tokens 后重试。", metadata)
         # 服务端工具或思考模式需要额外状态处理，不能将其误当作普通最终回答。
         if data.get("stop_reason") not in {"end_turn", "tool_use", "stop_sequence", "refusal"}:
-            raise RuntimeError(f"暂不支持的 Claude 结束原因：{data.get('stop_reason')}")
+            raise ModelResponseError("UNSUPPORTED_MODEL_RESPONSE", f"暂不支持的 Claude 结束原因：{data.get('stop_reason')}", metadata)
         texts, calls = [], []
         for block in data["content"]:
             if block["type"] == "text":
@@ -153,5 +176,5 @@ class ClaudeModel:
             elif block["type"] == "tool_use":
                 calls.append(ToolCall(block["id"], block["name"], json.dumps(block["input"], ensure_ascii=False)))
             else:
-                raise RuntimeError(f"暂不支持的 Claude 内容类型：{block['type']}")
-        return ModelReply("\n".join(texts) or None, calls)
+                raise ModelResponseError("UNSUPPORTED_MODEL_RESPONSE", f"暂不支持的 Claude 内容类型：{block['type']}", metadata)
+        return ModelReply("\n".join(texts) or None, calls, metadata)

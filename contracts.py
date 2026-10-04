@@ -9,6 +9,43 @@ class AgentCancelled(Exception):
 
 
 @dataclass(frozen=True)
+class ErrorInfo:
+    """稳定的错误分类；possible 表示不能保证操作没有产生副作用。"""
+
+    code: str
+    phase: str
+    message: str
+    side_effects: Literal["none", "possible"] = "none"
+    exception_type: str | None = None
+
+
+class ToolFailure(Exception):
+    """适配器可显式说明业务校验或部分执行失败，避免按异常文本猜测。"""
+
+    def __init__(self, info: ErrorInfo):
+        super().__init__(info.message)
+        self.info = info
+
+
+class ToolRejected(ToolFailure, ValueError):
+    """业务校验拒绝；处理函数可能已进入，但尚未发送输入。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(ErrorInfo(code, "validation", message))
+
+
+class TraceWriteError(RuntimeError):
+    """严格日志模式下停止任务；原始任务异常优先于日志异常。"""
+
+
+class ToolExecutionError(ToolFailure, RuntimeError):
+    """已进入处理函数的具体失败；适配器负责声明已知的副作用范围。"""
+
+    def __init__(self, code: str, message: str, *, phase: str = "execution", side_effects: Literal["none", "possible"] = "possible"):
+        super().__init__(ErrorInfo(code, phase, message, side_effects))
+
+
+@dataclass(frozen=True)
 class ImageContent:
     """内存中的图片附件；不将编码内容写入日志或普通 JSON 工具反馈。"""
 
@@ -56,22 +93,46 @@ class Message:
 
 
 @dataclass
+class ModelMetadata:
+    """响应诊断信息，不包含提示词、推理、凭证或完整厂商响应。"""
+
+    provider: str
+    model: str
+    finish_reason: str | None = None
+    request_id: str | None = None
+    response_id: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
+
+
+class ModelResponseError(RuntimeError):
+    """请求已有响应但不能作为有效决策使用；保留可用的响应诊断信息。"""
+
+    def __init__(self, code: str, message: str, metadata: ModelMetadata):
+        super().__init__(message)
+        self.code, self.metadata = code, metadata
+
+
+@dataclass
 class ModelReply:
     """模型的一次决策：回答文本、工具调用，或两者兼有。"""
 
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    metadata: ModelMetadata | None = None
 
 
 @dataclass
 class Observation:
-    """执行工具后的真实反馈；error 为空表示工具函数正常返回。"""
+    """调用反馈；executed 表示进入处理函数调用，不保证业务成功或已产生副作用。"""
 
     tool_call_id: str
     tool_name: str
     result: Any = None
     error: str | None = None
     images: list[ImageContent] = field(default_factory=list)
+    status: Literal["rejected", "succeeded", "failed", "cancelled"] = "succeeded"
+    executed: bool = False
+    error_info: ErrorInfo | None = None
 
 
 class ModelAdapter(Protocol):

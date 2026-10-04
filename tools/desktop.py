@@ -2,7 +2,7 @@
 
 from dataclasses import asdict
 
-from contracts import DesktopController, ToolResult, VisionAdapter
+from contracts import DesktopController, ToolRejected, ToolResult, VisionAdapter
 from core.tooling import ToolRegistry
 from validation import validate_question, validate_vision_answer
 
@@ -94,7 +94,10 @@ def register_desktop_tools(
 
     if vision is not None:
         def ask(_environment, question: str) -> ToolResult:
-            validate_question(question)
+            try:
+                validate_question(question)
+            except ValueError as error:
+                raise ToolRejected("INVALID_ARGUMENTS", str(error)) from error
             screenshot = desktop.screenshot()
             if len(screenshot.images) != 1:
                 raise ValueError("视觉提问需要一张桌面截图。")

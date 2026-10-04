@@ -1,5 +1,6 @@
 openai==3.24.0
 python-dotenv==1.2.4
+jsonschema==4.26.0
 Pillow==12.3.0
 mss==10.2.0
 PyAutoGUI==0.9.54; sys_platform == "win32"

@@ -38,6 +38,7 @@ def _create_model(
         client, model_name,
         # DeepSeek 扩展只用于该提供方；两个模型分别配置，不跨服务传递。
         extra_body={"thinking": {"type": "disabled"}} if provider == "deepseek" else None,
+        provider=provider,
     )
 
 
@@ -58,7 +59,10 @@ def main() -> None:
     parser.add_argument("--max-turns", type=int, help="模型轮次上限；普通模式 10，桌面模式 50")
     parser.add_argument("--screenshot-size", type=int, default=1600, help="截图最长边像素，640～3840；默认 1600")
     parser.add_argument("--trace-file", help="可选的 JSONL 运行日志路径；新建文件，不覆盖已有文件")
+    parser.add_argument("--trace-strict", action="store_true", help="运行日志写入失败时停止任务；需与 --trace-file 一起使用")
     args = parser.parse_args()
+    if args.trace_strict and not args.trace_file:
+        parser.error("--trace-strict 需与 --trace-file 一起使用。")
     if args.with_local_tools and not args.desktop:
         parser.error("--with-local-tools 需与 --desktop 一起使用。")
     if args.vision_mode == "separate" and not args.desktop:
@@ -130,6 +134,14 @@ def main() -> None:
             model, registry, environment, max_turns=args.max_turns or (50 if args.desktop else 10),
             cancel_check=desktop.check_cancelled if desktop else None,
             trace=trace,
+            trace_strict=args.trace_strict,
+            run_config={
+                "mode": "desktop" if args.desktop else "local",
+                "vision_mode": args.vision_mode if args.desktop else None,
+                "working_directory": str(environment.working_directory) if environment.working_directory else None,
+                "vision_model": {"provider": vision_settings["provider"], "model": vision_settings["model_name"]}
+                                if vision_settings else None,
+            },
         )
         try:
             if desktop is not None:
