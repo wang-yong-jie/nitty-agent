@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 import adapters.local as environment_module
 import cli as main
+import bootstrap
 from tests.fakes import MemoryEnvironment, SequenceModel, call, sdk_response
 from core.agent import Agent
 from core.context import ContextBuilder
@@ -69,12 +70,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(observations[-1].result, 6)
         self.assertTrue(all(m.is_error for m in model.requests[1][0][-4:]))
 
-    def test_new_task_has_separate_history(self):
-        """同一 Agent 连续运行任务时创建新状态，不共享 messages 列表。"""
+    def test_new_session_has_separate_history(self):
+        """执行状态始终独立；显式新会话才清空历史。"""
         model = SequenceModel(ModelReply("回答一"), ModelReply("回答二"))
         agent = Agent(model, ToolRegistry(), self.environment, verbose=False)
         agent.run("任务一")
         previous = agent.last_state
+        agent.new_session()
         agent.run("任务二")
         self.assertIsNot(previous, agent.last_state)
         self.assertEqual(previous.answer, "回答一")
@@ -285,9 +287,9 @@ class CliTests(unittest.TestCase):
             patch.object(sys, "argv", ["main.py", *arguments]),
             patch("builtins.input", return_value="测试任务"),
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test", "OPENAI_API_KEY": "test", "ANTHROPIC_API_KEY": "test"}),
-            patch.object(main, "load_dotenv"),
-            patch.object(main, "OpenAI"),
-            patch.object(main, "Agent") as api,
+            patch.object(bootstrap, "load_dotenv"),
+            patch.object(bootstrap, "OpenAI"),
+            patch.object(bootstrap, "Agent") as api,
             redirect_stdout(StringIO()),
         ):
             api.return_value.run.return_value = "已完成"

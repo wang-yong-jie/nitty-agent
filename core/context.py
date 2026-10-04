@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from contracts import Message, ToolSpec
 from core.state import AgentState
+from core.session import trim_history
 
 
 BASE_INSTRUCTIONS = (
@@ -21,11 +22,15 @@ BASE_INSTRUCTIONS = (
 class ContextBuilder:
     """只组装消息；环境读取和操作由注入的 Environment 提供。"""
 
-    def __init__(self, instructions: str = BASE_INSTRUCTIONS, max_images: int = 2):
+    def __init__(self, instructions: str = BASE_INSTRUCTIONS, max_images: int = 2,
+                 max_history_chars: int = 64000, max_history_messages: int = 160):
         if type(max_images) is not int or max_images < 1:
             raise ValueError("max_images 必须是正整数。")
         self.instructions = instructions
         self.max_images = max_images
+        trim_history([], max_history_chars, max_history_messages)
+        self.max_history_chars = max_history_chars
+        self.max_history_messages = max_history_messages
 
     def build_messages(
         self, state: AgentState, environment_info: dict, tools: list[ToolSpec],
@@ -34,12 +39,15 @@ class ContextBuilder:
         sections = [self.instructions, f"当前环境信息：{json.dumps(environment_info, ensure_ascii=False)}。"]
         # 规则随工具注册；共享规则按首次出现的顺序去重，不依赖具体工具名称。
         sections.extend(dict.fromkeys(tool.instructions for tool in tools if tool.instructions))
+        bounded, omitted = trim_history(state.messages, self.max_history_chars, self.max_history_messages)
+        if omitted or state.omitted_messages:
+            sections.append("部分较早的会话历史已按长度预算裁剪；缺失信息不能凭空补全，必要时询问用户或重新读取。")
         # 系统信息独立于任务历史，避免动态提示词反复追加到状态里。
         # 保留角色和调用 ID，防止把工具反馈误当成用户任务。
         # 不修改可供调试的原始状态；旧图只从模型输入中移除，文字及调用 ID 保留。
         history = []
         remaining = self.max_images
-        for message in reversed(state.messages):
+        for message in reversed(bounded):
             images = message.images[-remaining:] if remaining else []
             remaining -= len(images)
             content = message.content

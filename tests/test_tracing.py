@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import cli as main
+import bootstrap
 from core.agent import Agent
 from contracts import AgentCancelled, ImageContent, ModelReply, ToolCall, ToolResult
 from tests.fakes import MemoryEnvironment, MemoryTrace, SequenceModel, call
@@ -128,8 +129,8 @@ class TracingTests(unittest.TestCase):
                 patch("sys.argv", ["main.py", "--workdir", root, "--trace-file", str(path)]),
                 patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test-key"}),
                 patch("builtins.input", return_value="写文件"),
-                patch.object(main, "load_dotenv"),
-                patch.object(main, "_create_model", return_value=model),
+                patch.object(bootstrap, "load_dotenv"),
+                patch.object(bootstrap, "create_model", return_value=model),
                 redirect_stdout(StringIO()),
             ):
                 main.main()

@@ -4,3 +4,6 @@ jsonschema==4.26.0
 Pillow==12.3.0
 mss==10.2.0
 PyAutoGUI==0.9.54; sys_platform == "win32"
+fastapi==0.142.2
+uvicorn==0.54.0
+httpx==0.28.1

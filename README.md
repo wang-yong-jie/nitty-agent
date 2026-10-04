@@ -3,6 +3,129 @@
 使用 Python 3.12。默认模型为 DeepSeek `deepseek-flash`，接口采用 OpenAI 兼容格式。
 架构为 **单 Agent + 模块化 Runtime + 可插拔 Model / Tool / Environment**。
 
+## 本地浏览器控制台
+
+新增 React + TypeScript + Vite + Ant Design 前端与 FastAPI 本地服务。
+支持连续会话、运行设置、实时执行时间线、错误详情、停止、最终回答和历史恢复。
+Python Agent 在独立工作进程中运行，网页刷新或断开不会取消任务；一次只执行一个任务。
+
+首次使用，在项目根目录安装 Python 依赖并构建前端（需要兼容的 Node.js，当前开发环境为 24.14）：
+
+```powershell
+conda run -n agent python -m pip install -r requirements.txt
+cd frontend
+npm ci
+npm run build
+cd ..
+conda run --no-capture-output -n agent python web.py
+```
+
+浏览器打开 **http://127.0.0.1:8765**。后续直接启动 `web.py`，只有修改前端后才需要重新构建。
+在 PyCharm 中选择 Conda `agent` 解释器，右键运行 `web.py`；CLI 仍通过 `main.py` 启动。
+模型密钥仍配置在项目 `.env` 或环境变量中，浏览器只显示密钥是否已配置。
+调整已加载的 `.env` 密钥后重启服务。不要同时启动多个 Web 调度服务。
+
+- 文件与 Shell 模式复用已有本机工具，工作目录不是文件访问边界。
+- 桌面模式复用现有截图、输入、F8 急停和独立视觉模型能力。
+- 停止按钮先显示“正在停止”：正在进行的模型请求或 Shell 命令可能需要等待返回，
+  在下一个取消检查点停止；执行进程退出后才显示“已停止”。若任务已完成，停止请求不会修改完成结果。
+- 任务与结果保存在 `.agent-data/tasks.sqlite3`，JSONL 日志保存在 `.agent-logs/`。
+  任务文本、结果和事件是本地持久化数据；截图编码不通过此 Web API 返回。
+- 左侧按会话组织历史。在“会话记录”输入框中继续追问，Agent 会继承此前的问答和工具反馈。
+  “新建会话”开始独立历史；每次追问仍生成独立任务和运行日志，可分别查看执行状态。
+  追问沿用会话最近一次的模型与运行设置，以及已创建的工作目录；旧任务可以复制到新会话重新配置。
+- SSE 带事件 ID，断线重连使用 `Last-Event-ID` 续传；界面显示最新 1000 条事件，
+  完整事件可通过 API 分页获取。文件日志故障不会关闭界面事件。
+- 服务重启后，遗留活动任务标记为“已中断”，不会自动重试可能产生副作用的操作。
+  工作进程会在取消检查点检测父服务是否已退出并停止后续操作；已经发出的外部调用仍可能需要等待返回。
+  正常关闭服务先请求停止，等待 5 秒后仍未退出则结束工作进程。模型或命令调用中的强制关闭
+  不保证其外部操作已撤销；建议先停止任务并等待终态，再关闭服务。
+- 服务入口仅监听回环地址，并校验 Host / Origin。这是本机单用户控制台，尚未提供远程访问、用户认证或桌面安装包。
+
+前端开发使用两个终端：项目根目录启动 `web.py`；另一个终端进入 `frontend` 执行 `npm run dev`。
+打开 http://127.0.0.1:5173，Vite 将 `/api` 转发到 8765。右侧设置作用于下一次提交的任务。
+
+接口变更后同步生成类型：
+
+```powershell
+conda run --no-capture-output -n agent python scripts/export_openapi.py
+cd frontend
+npm run generate:api
+npm run test
+npm run build
+```
+
+不要手改 `frontend/src/api/schema.d.ts`。完整前端约定见 [frontend/AGENTS.md](frontend/AGENTS.md)，
+实施计划见 [docs/frontend-plan.md](docs/frontend-plan.md)。
+
+离线验证：
+
+```powershell
+conda run --no-capture-output -n agent python -m unittest discover -v
+```
+
+新增测试覆盖真实 Windows spawn、SQLite、任务互斥、协作取消、异常退出、API 校验、SSE 续传，
+以及真实本地 HTTP 服务的静态页面和事件流。前端组件测试验证提交、停止、结果恢复和错误详情。
+如需手动验收，可运行 `conda run --no-capture-output -n agent python -m tests.run_web_fixture`，
+打开 http://127.0.0.1:8766；该测试服务只使用内存工具和测试模型，不会操作真实文件或桌面。
+任务文本加入 `[fail]` 模拟失败，加入 `[slow]` 验证停止。这个入口仅供测试，正常使用请运行 `web.py`。
+
+Web 架构：
+
+```text
+浏览器 → FastAPI → TaskManager → 独立工作进程 → bootstrap → Agent
+                     │               │
+                     ├─ SQLite ← 已脱敏运行事件
+                     └─ SSE → 浏览器  └─ JSONL（独立故障处理）
+```
+
+## 会话与单次执行
+
+`Session` 管理对话历史，`Run` 对应一次 `Agent.run(task)`，由 `AgentState` 保存独立轮次、
+工具 Observation、回答和错误。一次 Run 完成、失败或停止都不会清空会话，也不会自动重执行历史工具调用。
+
+Python 中，同一个 Agent 默认连续对话：
+
+```python
+agent.run("读取项目说明，整理结构")
+agent.run("基于刚才的结果，解释入口模块")
+previous_session = agent.session
+agent.new_session()  # 显式清空对话历史；不删除已经生成的文件。
+agent.run("开始另一个话题")
+```
+
+可将 `Session.to_dict()` 存为 JSON，用 `Session.from_dict(data)` 恢复，并在构造 Agent 时传入
+`session=restored_session`。Web 服务自动保存会话检查点和任务记录；重启后选择原会话即可继续。
+旧数据库中的任务会分别迁入独立会话，并保留用户问题和最终回答；无法还原此前未保存的完整模型历史。
+
+历史采用确定性的长度裁剪，不额外调用模型生成摘要：默认最多 **160 条消息、约 64,000 字符预算**，
+计入文字与工具调用参数，优先保留最新用户问题与最近消息。工具调用和对应结果整体保留或移除，
+不会留下孤立结果。模型输入与持久化历史都受限；较早内容可能丢失，系统提示会明确说明历史已裁剪。
+这是字符预算，不是精确 token 计数，也不包含系统提示词、工具 schema 和图片开销。
+Python 调用方可通过 `ContextBuilder(max_history_chars=..., max_history_messages=...)` 调整输入预算，
+通过 Session 的同名字段调整保存预算。完整任务记录和事件仍留在 SQLite，供查看执行历史。
+
+图片只保留在本次 Run 的内存状态中，会话历史不会保存截图编码；追问操作桌面时需要重新截图。
+中断时缺失的工具结果会标为“结果未知，需核实”，避免把已发出的操作当作成功或直接重放。
+会话历史用于继续当前对话，不包含用户偏好记忆或跨会话检索。
+
+API：`POST /api/sessions` 创建会话，`GET /api/sessions` 列出会话，
+`GET /api/sessions/{id}/tasks` 查看会话内的任务。`POST /api/tasks` 携带 `session_id` 可追问；
+不携带则新建会话。省略 `options` 时沿用该会话最近的设置，首次任务使用默认设置。
+任务记录包含 `session_id`；会话详情只返回元数据，不将完整工具上下文暴露给浏览器。
+
+命令行连续会话：
+
+```powershell
+conda run --no-capture-output -n agent python main.py --chat
+conda run --no-capture-output -n agent python main.py --chat --new-session
+conda run --no-capture-output -n agent python main.py --chat --session-file .agent-data/my-session.json
+```
+
+`--chat` 默认恢复并保存 `.agent-data/cli-session.json`；输入 `/new` 新建会话，`/exit` 退出。
+不加 `--chat` 时仍只执行一次任务，可指定 `--session-file` 在多次 CLI 启动间继续同一会话。
+CLI 会话文件与 Web 会话存储相互独立。自定义会话文件属于本地任务数据，请勿提交到 Git。
+
 ## 在 PyCharm 中运行
 
 1. 打开本项目，解释器选择已有 Conda 环境 `agent`：
@@ -35,7 +158,12 @@ PyCharm 选择根目录的 `main.py` 作为脚本，项目根目录作为工作�
 ```text
 nitty-agent/
 ├── main.py                    # PyCharm / 终端启动入口
-├── cli.py                     # 参数、配置与依赖装配
+├── cli.py                     # 命令行参数与任务输入
+├── web.py                     # 本地 Web 服务入口
+├── bootstrap.py               # CLI / Web 共用的配置与依赖装配
+├── api/                       # HTTP、OpenAPI 与 SSE
+├── service/                   # 工作进程、任务生命周期与 SQLite
+├── frontend/                  # React + TypeScript 本地控制台
 ├── contracts.py               # 共享接口和消息类型
 ├── validation.py              # 工具与适配器共享的校验
 ├── tracing.py                 # 日志、脱敏与追踪输出
@@ -44,6 +172,7 @@ nitty-agent/
 │   ├── runtime.py             # Agent Loop
 │   ├── context.py             # 上下文组装
 │   ├── state.py               # 运行状态
+│   ├── session.py             # 会话历史、序列化和长度裁剪
 │   └── tooling.py             # 通用工具注册与执行
 ├── adapters/
 │   ├── models.py              # OpenAI 兼容、Claude 与文本模型包装
@@ -63,7 +192,7 @@ nitty-agent/
 
 业务目录直接放在项目根目录。`core` 负责通用决策循环，`tools` 定义暴露给模型的能力，
 `adapters` 实现外部系统的具体操作。工具通过 `contracts.py` 中的接口接受依赖；
-模型和 Windows 实现由 `cli.py` 或 Python 调用方装配。
+CLI 与 Web 通过 `bootstrap.py` 装配模型和 Windows 实现，Python 调用方也可自行装配。
 `core` 与 `tools` 不导入具体适配器；共享校验放在 `validation.py`。
 日志和接口各自保留一个共享模块。测试替身集中管理，测试模块之间不相互导入。
 
@@ -93,6 +222,7 @@ User → Agent.run(task)
 | Agent API | `core/agent.py` | `Agent.run(task)` 提交任务，返回最终回答 |
 | Runtime / Loop | `core/runtime.py` | 协调上下文、模型决策、工具执行和循环结束 |
 | State | `core/state.py` | 保存任务、历史、轮次、Observation、状态和最终回答 |
+| Session | `core/session.py` | 跨 Run 对话历史、工具配对、裁剪与序列化 |
 | Context | `core/context.py` | 收集工具附带的使用规则，将指令、环境快照与历史组装为模型输入 |
 | Model Adapter | `adapters/models.py` | 转换 OpenAI 兼容或 Claude 原生协议 |
 | Vision Adapter | `adapters/vision.py` | 根据具体问题解释截图，校验结构化回答和目标坐标 |
@@ -104,7 +234,10 @@ User → Agent.run(task)
 | Tracing | `tracing.py` | 控制台参数/耗时日志、脱敏及可选 JSONL 事件文件 |
 | 公共接口与数据 | `contracts.py` | 定义模型/环境接口及消息、调用、Observation |
 | 共享校验 | `validation.py` | 校验应用名称、视觉问题和视觉结果 |
-| 配置入口 | `main.py` → `cli.py` | 启动、读取配置和输入，将各模块装配起来 |
+| 配置入口 | `main.py` → `cli.py` / `web.py` → `api/` | CLI 输入 / Web 接口，将任务提交给 Agent 或 TaskManager |
+| 共享装配 | `bootstrap.py` | 统一配置校验、模型和工具创建以及资源生命周期 |
+| 任务服务 | `service/` | 进程隔离、单任务调度、取消、持久化和事件游标 |
+| Web 前端 | `frontend/` | 运行设置、任务历史、时间线、错误详情和回答展示 |
 
 Runtime 中没有厂商 SDK、`subprocess` 或文件读写代码。
 模块通过统一数据类型交互，模型看不到处理函数或环境对象，只获得描述和真实反馈。

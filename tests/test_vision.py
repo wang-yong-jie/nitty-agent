@@ -1,5 +1,7 @@
 """双视觉模式的离线测试；网络模型和 Windows 输入均使用替身。"""
 
+import bootstrap
+
 import json
 import os
 import unittest
@@ -263,9 +265,9 @@ class VisionCliTests(unittest.TestCase):
             patch("sys.argv", ["main.py", *arguments]),
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "planner-key", **(env or {})}, clear=True),
             patch("builtins.input", return_value="检查界面"),
-            patch.object(main, "load_dotenv"), patch.object(main, "OpenAI") as clients,
-            patch.object(main, "ModelVisionAdapter", wraps=ModelVisionAdapter) as vision,
-            patch.object(main, "Agent") as agent,
+            patch.object(bootstrap, "load_dotenv"), patch.object(bootstrap, "OpenAI") as clients,
+            patch.object(bootstrap, "ModelVisionAdapter", wraps=ModelVisionAdapter) as vision,
+            patch.object(bootstrap, "Agent") as agent,
             patch("adapters.windows_desktop.WindowsDesktop") as desktop,
             redirect_stdout(StringIO()), redirect_stderr(StringIO()),
         ):
@@ -301,7 +303,7 @@ class VisionCliTests(unittest.TestCase):
             "VISION_PROVIDER": "claude", "VISION_MODEL": "test-claude-vlm", "ANTHROPIC_API_KEY": "claude-key",
         })
         vision_model = result.vision.call_args.args[0]
-        self.assertIsInstance(vision_model, main.ClaudeModel)
+        self.assertIsInstance(vision_model, bootstrap.ClaudeModel)
         self.assertEqual(vision_model.api_key, "claude-key")
         self.assertEqual(vision_model.model, "test-claude-vlm")
         self.assertEqual(result.clients.call_count, 1)
@@ -329,7 +331,7 @@ class VisionCliTests(unittest.TestCase):
             (["--desktop", "--vision-mode", "separate"], {}),
             (["--desktop", "--vision-mode", "separate"], {"VISION_MODEL": "vlm", "VISION_PROVIDER": "invalid"}),
         ):
-            with self.subTest(arguments=arguments, env=env), patch.object(main, "_create_model") as create:
+            with self.subTest(arguments=arguments, env=env), patch.object(bootstrap, "create_model") as create:
                 with self.assertRaises(SystemExit):
                     self.run_cli(arguments, env)
                 create.assert_not_called()

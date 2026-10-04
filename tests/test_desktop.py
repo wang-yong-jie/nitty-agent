@@ -383,13 +383,14 @@ class NativeInputTests(unittest.TestCase):
 class DesktopCliTests(unittest.TestCase):
     def test_desktop_mode_configuration_and_cleanup(self):
         import cli as main
+        import bootstrap
 
         with (
             patch("sys.argv", ["main.py", "--desktop", "--max-turns", "75"]),
             patch("builtins.input", return_value="桌面任务"),
             patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test"}),
-            patch.object(main, "load_dotenv"), patch.object(main, "OpenAI"),
-            patch.object(main, "Agent") as agent,
+            patch.object(bootstrap, "load_dotenv"), patch.object(bootstrap, "OpenAI"),
+            patch.object(bootstrap, "Agent") as agent,
             patch("adapters.windows_desktop.WindowsDesktop") as desktop,
             redirect_stdout(StringIO()),
         ):

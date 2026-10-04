@@ -1,5 +1,7 @@
 """从事件还原调用结果，并验证日志故障不遮蔽原始任务错误。"""
 
+import bootstrap
+
 import json
 import os
 import tempfile
@@ -29,8 +31,8 @@ class RuntimeEventTests(unittest.TestCase):
             patch("sys.argv", ["main.py", "--workdir", root, "--trace-file", "unused.jsonl", "--trace-strict"]),
             patch("builtins.input", return_value="任务"),
             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
-            patch.object(cli, "load_dotenv"),
-            patch.object(cli, "_create_model", return_value=model),
+            patch.object(bootstrap, "load_dotenv"),
+            patch.object(bootstrap, "create_model", return_value=model),
             patch.object(cli, "JsonlTrace") as trace_file,
             redirect_stderr(StringIO()), redirect_stdout(StringIO()),
         ):

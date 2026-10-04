@@ -8,7 +8,7 @@ from contracts import ErrorInfo, Message, Observation
 
 @dataclass
 class AgentState:
-    """每次 run 创建新状态；执行环境由 Agent 实例持有，可继续保留文件。"""
+    """每次 run 创建新执行状态；消息包含当前会话历史，Observation 仅属于本次执行。"""
 
     task: str
     messages: list[Message] = field(default_factory=list)
@@ -21,3 +21,5 @@ class AgentState:
     stop_reason: str | None = None
     trace_errors: list[str] = field(default_factory=list)
     run_id: str | None = None
+    session_id: str | None = None
+    omitted_messages: int = 0

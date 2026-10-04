@@ -11,6 +11,7 @@ from contracts import (
     ModelMetadata, ModelResponseError, Observation, TraceWriteError,
 )
 from core.state import AgentState
+from core.session import Session
 from core.tooling import ToolExecutor, ToolRegistry
 from tracing import RunLogger
 
@@ -40,6 +41,17 @@ class AgentRuntime:
         self.state: AgentState | None = None
         self.logger = RunLogger(verbose, trace, strict=trace_strict)
         self.run_config = dict(run_config or {})
+        self.session = Session()
+        self.on_session_update = None
+
+    def _checkpoint(self, state: AgentState) -> None:
+        self.session.omitted_messages = state.omitted_messages
+        self.session.update(state.messages)
+        directory = getattr(self.environment, "working_directory", None)
+        if directory is not None:
+            self.session.working_directory = str(directory)
+        if self.on_session_update is not None:
+            self.on_session_update(self.session)
 
     @staticmethod
     def _error_info(error: Exception, phase: str) -> ErrorInfo:
@@ -61,14 +73,16 @@ class AgentRuntime:
         ))
 
     def run(self, task: str) -> AgentState:
-        """每次任务独立维护历史；结束后保留状态供调用方检查。"""
+        """执行状态属于本次任务；历史继承会话，结束后保留状态供检查。"""
         if not task.strip():
             raise ValueError("任务不能为空。")
-        state = AgentState(task=task, messages=[Message(role="user", content=task)])
+        state = AgentState(task=task, session_id=self.session.id, omitted_messages=self.session.omitted_messages,
+                           messages=[*self.session.messages, Message(role="user", content=task)])
         self.state = state
         run_started = time.perf_counter()
         phase = "setup"
         try:
+            self._checkpoint(state)
             # 只记录调用方显式提供的非敏感配置，不遍历模型对象或保存用户任务。
             self.logger.start(config=self.run_config, max_turns=self.max_turns,
                               tools=[spec.name for spec in self.registry.specs()],
@@ -122,6 +136,8 @@ class AgentRuntime:
                     state.stop_reason = "model_answer"
                     break
 
+                self._checkpoint(state)
+
                 # 先记录整组调用，再逐一执行并回传，每个结果都与调用 ID 配对。
                 batch_error = self.executor.batch_error(reply.tool_calls)
                 for call in reply.tool_calls:
@@ -160,6 +176,7 @@ class AgentRuntime:
                         raise
                     duration = time.perf_counter() - started
                     self._record(state, observation)
+                    self._checkpoint(state)
                     self.logger.tool_finished(observation, turn, duration)
                 # Observation 进入历史，下一轮由模型根据真实结果重新决策。
             else:
@@ -199,4 +216,11 @@ class AgentRuntime:
             finally:
                 state.trace_errors = list(self.logger.errors)
                 state.run_id = self.logger.run_id
+                history = list(state.messages)
+                if state.status != "completed":
+                    history.append(Message("assistant", f"[本次执行状态：{state.status}；{state.error or state.stop_reason}。"
+                                           "已有操作可能产生影响，后续追问应先核实。]"))
+                # 补齐取消时未返回的工具结果只作用于会话，不改变原始执行状态。
+                saved_state = AgentState(task=state.task, messages=history, omitted_messages=state.omitted_messages)
+                self._checkpoint(saved_state)
         return state
