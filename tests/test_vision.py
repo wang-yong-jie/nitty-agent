@@ -9,16 +9,15 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import main
-from agent import Agent
+import cli as main
+from core.agent import Agent
 from contracts import AgentCancelled, ImageContent, Message, ModelReply, VisionAdapter, VisionAnswer, VisualTarget
-from desktop import WindowsDesktop
-from desktop_tools import register_desktop_tools
-from model import TextOnlyModel
-from test_desktop import FakeBackend
-from test_main import MemoryEnvironment, SequenceModel, call
-from tools import ToolExecutor, ToolRegistry
-from vision import ModelVisionAdapter
+from adapters.windows_desktop import WindowsDesktop
+from tools.desktop import register_desktop_tools
+from adapters.models import TextOnlyModel
+from tests.fakes import FakeBackend, MemoryEnvironment, SequenceModel, call
+from core.tooling import ToolExecutor, ToolRegistry
+from adapters.vision import ModelVisionAdapter
 
 
 def visual_reply(answer="保存按钮位于窗口右下方。", targets=None, status="answered"):
@@ -264,7 +263,7 @@ class VisionCliTests(unittest.TestCase):
             patch.object(main, "load_dotenv"), patch.object(main, "OpenAI") as clients,
             patch.object(main, "ModelVisionAdapter", wraps=ModelVisionAdapter) as vision,
             patch.object(main, "Agent") as agent,
-            patch("desktop.WindowsDesktop") as desktop,
+            patch("adapters.windows_desktop.WindowsDesktop") as desktop,
             redirect_stdout(StringIO()), redirect_stderr(StringIO()),
         ):
             agent.return_value.run.return_value = "done"
@@ -280,7 +279,8 @@ class VisionCliTests(unittest.TestCase):
         args = result.agent.call_args.args
         self.assertIsInstance(args[0], TextOnlyModel)
         self.assertEqual(args[0].delegate.model, "deepseek-flash")
-        self.assertEqual(len(args[1].specs()), 13)
+        self.assertEqual(len(args[1].specs()), 14)
+        self.assertIn("app_find", {s.name for s in args[1].specs()})
         self.assertIn("desktop_ask", {s.name for s in args[1].specs()})
         vision_model = result.vision.call_args.args[0]
         self.assertEqual(vision_model.model, "test-vlm")
@@ -315,7 +315,7 @@ class VisionCliTests(unittest.TestCase):
     def test_direct_default_ignores_optional_vision_env(self):
         result = self.run_cli(["--desktop"], {"VISION_MODEL": "unused-vlm", "VISION_PROVIDER": "invalid"})
         self.assertNotIsInstance(result.agent.call_args.args[0], TextOnlyModel)
-        self.assertEqual(len(result.agent.call_args.args[1].specs()), 9)
+        self.assertEqual(len(result.agent.call_args.args[1].specs()), 10)
         result.vision.assert_not_called()
         self.assertEqual(result.clients.call_count, 1)
 

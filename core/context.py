@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 
 from contracts import Message, ToolSpec
-from state import AgentState
+from core.state import AgentState
 
 
 BASE_INSTRUCTIONS = (

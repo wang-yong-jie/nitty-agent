@@ -123,6 +123,20 @@ class Environment(Protocol):
         ...
 
 
+class ApplicationCatalog(Protocol):
+    """只读应用发现；不负责启动、截图或任务决策。"""
+
+    def find(self, name: str) -> dict:
+        ...
+
+
+class EventSink(Protocol):
+    """接收已经脱敏的运行事件；Runtime 不管理日志文件。"""
+
+    def emit(self, event: dict) -> None:
+        ...
+
+
 class DesktopController(Protocol):
     """可选桌面能力；文件/Shell 环境不必实现此接口。"""
 

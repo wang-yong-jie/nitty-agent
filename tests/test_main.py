@@ -1,6 +1,5 @@
 """不联网测试：验证插件替换、协议转换、状态反馈和本机执行行为。"""
 
-import copy
 import json
 import os
 import sys
@@ -13,73 +12,17 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from openai.types.chat import ChatCompletion
-
-import environment as environment_module
-import main
-from agent import Agent
-from context import ContextBuilder
+import adapters.local as environment_module
+import cli as main
+from tests.fakes import MemoryEnvironment, SequenceModel, call, sdk_response
+from core.agent import Agent
+from core.context import ContextBuilder
 from contracts import Message, ModelReply, ToolCall
-from environment import LocalEnvironment
-from model import ClaudeModel, OpenAICompatibleModel
-from state import AgentState
-from tools import ToolRegistry, create_default_registry
-
-
-class SequenceModel:
-    """完全不依赖厂商 SDK 的测试模型，证明 Runtime 可以替换 Model。"""
-
-    def __init__(self, *replies):
-        self.replies = iter(replies)
-        self.requests = []
-
-    def generate(self, messages, tools):
-        self.requests.append(copy.deepcopy((messages, tools)))
-        reply = next(self.replies)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
-
-
-class MemoryEnvironment:
-    """不接触本机文件或 Shell 的环境插件，证明默认工具可以替换 Environment。"""
-
-    def __init__(self):
-        self.files = {}
-        self.commands = []
-
-    def get_info(self):
-        return {"shell": "memory-shell", "working_directory": "memory:/work" if self.files else None}
-
-    def read_file(self, path):
-        return {"content": self.files[path], "truncated": False}
-
-    def write_file(self, path, content):
-        self.files[path] = content
-        return f"已写入 {path}"
-
-    def exec_command(self, cmd, workdir=None, timeout=30):
-        self.commands.append(cmd)
-        return {"exit_code": 0, "stdout": "模拟执行结果", "stderr": "", "timed_out": False}
-
-
-def call(call_id, name, arguments):
-    """创建统一调用，不依赖 OpenAI 的函数调用类。"""
-    return ToolCall(call_id, name, json.dumps(arguments, ensure_ascii=False))
-
-
-def sdk_response(content=None, calls=None, finish_reason=None):
-    """适配器测试使用真实 OpenAI SDK 响应类型，不发送网络请求。"""
-    return ChatCompletion.model_validate({
-        "id": "test", "object": "chat.completion", "created": 0, "model": "test-model",
-        "choices": [{
-            "index": 0, "finish_reason": finish_reason or ("tool_calls" if calls else "stop"),
-            "message": {"role": "assistant", "content": content, "tool_calls": [
-                {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
-                for c in calls or []
-            ] or None},
-        }],
-    })
+from adapters.local import LocalEnvironment
+from adapters.models import ClaudeModel, OpenAICompatibleModel
+from core.state import AgentState
+from core.tooling import ToolRegistry
+from tools.local import create_default_registry
 
 
 class RuntimeTests(unittest.TestCase):
@@ -281,7 +224,7 @@ class ModelAdapterTests(unittest.TestCase):
         env = MemoryEnvironment()
         env.files["note"] = "内容"
         agent = Agent(ClaudeModel("test-key", "test-claude"), create_default_registry(), env, verbose=False)
-        with patch("model.urlopen", side_effect=transport):
+        with patch("adapters.models.urlopen", side_effect=transport):
             self.assertEqual(agent.run("读取两个文件"), "已检查")
         self.assertTrue(bodies[0]["system"])
         self.assertIn("input_schema", bodies[0]["tools"][0])
@@ -294,10 +237,10 @@ class ModelAdapterTests(unittest.TestCase):
 
     def test_claude_truncation_and_transport_failure(self):
         adapter = ClaudeModel("test-key", "test-model")
-        with patch("model.urlopen", return_value=BytesIO(b'{"stop_reason": "max_tokens", "content": []}')):
+        with patch("adapters.models.urlopen", return_value=BytesIO(b'{"stop_reason": "max_tokens", "content": []}')):
             with self.assertRaisesRegex(RuntimeError, "截断"):
                 adapter.generate([Message("user", "测试")], [])
-        with patch("model.urlopen", side_effect=ConnectionError("网络失败")):
+        with patch("adapters.models.urlopen", side_effect=ConnectionError("网络失败")):
             with self.assertRaises(ConnectionError):
                 adapter.generate([Message("user", "测试")], [])
 

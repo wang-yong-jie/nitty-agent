@@ -26,6 +26,50 @@ conda run --no-capture-output -n agent python main.py
 conda run --no-capture-output -n agent python main.py --workdir "C:\Users\wangy\Desktop"
 ```
 
+PyCharm 选择根目录的 `main.py` 作为脚本，项目根目录作为工作目录；
+无需额外配置 `PYTHONPATH` 或将子目录标记为 Sources Root。
+`.env` 始终从项目根目录读取，不随工作目录变化；日志相对路径仍按启动目录解析。
+
+## 目录结构与依赖方向
+
+```text
+nitty-agent/
+├── main.py                    # PyCharm / 终端启动入口
+├── cli.py                     # 参数、配置与依赖装配
+├── contracts.py               # 共享接口和消息类型
+├── validation.py              # 工具与适配器共享的校验
+├── tracing.py                 # 日志、脱敏与追踪输出
+├── core/
+│   ├── agent.py               # 对外调用 API
+│   ├── runtime.py             # Agent Loop
+│   ├── context.py             # 上下文组装
+│   ├── state.py               # 运行状态
+│   └── tooling.py             # 通用工具注册与执行
+├── adapters/
+│   ├── models.py              # OpenAI 兼容、Claude 与文本模型包装
+│   ├── vision.py              # 按需视觉问答
+│   ├── local.py               # 本机文件与 Shell 环境
+│   ├── windows_desktop.py     # Windows 截图与输入
+│   └── windows_apps.py        # Windows 应用查询
+├── tools/
+│   ├── local.py               # 文件 / Shell 工具定义
+│   ├── desktop.py             # 桌面工具定义
+│   └── applications.py        # 应用查询工具定义
+├── tests/                     # 离线测试；共享替身位于 fakes.py
+├── requirements.txt
+├── .env.example
+└── AGENTS.md
+```
+
+业务目录直接放在项目根目录。`core` 负责通用决策循环，`tools` 定义暴露给模型的能力，
+`adapters` 实现外部系统的具体操作。工具通过 `contracts.py` 中的接口接受依赖；
+模型和 Windows 实现由 `cli.py` 或 Python 调用方装配。
+`core` 与 `tools` 不导入具体适配器；共享校验放在 `validation.py`。
+日志和接口各自保留一个共享模块。测试替身集中管理，测试模块之间不相互导入。
+
+在项目根目录调用 Python API，使用 `from core.agent import Agent`，其他导入见下文示例。
+程序通过 `python main.py ...` 启动。
+
 ## 架构与文件职责
 
 ```text
@@ -38,24 +82,29 @@ User → Agent.run(task)
        ├── ModelAdapter → DeepSeek / OpenAI / Claude
        └── ToolRegistry → ToolExecutor
                               ├── Environment（文件 / Shell）
-                              └── DesktopController（桌面）
+                              ├── DesktopController（桌面）
+                              └── ApplicationCatalog（只读应用查询）
                      desktop_ask → VisionAdapter → VLM（分离模式）
                     Observation → 状态 → 下一轮决策
 ```
 
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
-| Agent API | `agent.py` | `Agent.run(task)` 提交任务，返回最终回答 |
-| Runtime / Loop | `runtime.py` | 协调上下文、模型决策、工具执行和循环结束 |
-| State | `state.py` | 保存任务、历史、轮次、Observation、状态和最终回答 |
-| Context | `context.py` | 收集工具附带的使用规则，将指令、环境快照与历史组装为模型输入 |
-| Model Adapter | `model.py` | 转换 OpenAI 兼容或 Claude 原生协议 |
-| Vision Adapter | `vision.py` | 根据具体问题解释截图，校验结构化回答和目标坐标 |
-| Tool Registry / Executor | `tools.py` | 注册描述、使用规则和处理函数，解析参数，调度并反馈错误 |
-| Environment | `environment.py` | `LocalEnvironment` 负责本机路径、文件和 Shell 操作 |
-| Desktop | `desktop.py` / `desktop_tools.py` | Windows 截图、输入、坐标映射与桌面工具注册 |
+| Agent API | `core/agent.py` | `Agent.run(task)` 提交任务，返回最终回答 |
+| Runtime / Loop | `core/runtime.py` | 协调上下文、模型决策、工具执行和循环结束 |
+| State | `core/state.py` | 保存任务、历史、轮次、Observation、状态和最终回答 |
+| Context | `core/context.py` | 收集工具附带的使用规则，将指令、环境快照与历史组装为模型输入 |
+| Model Adapter | `adapters/models.py` | 转换 OpenAI 兼容或 Claude 原生协议 |
+| Vision Adapter | `adapters/vision.py` | 根据具体问题解释截图，校验结构化回答和目标坐标 |
+| Tool Registry / Executor | `core/tooling.py` | 注册描述、使用规则和处理函数，解析参数，调度并反馈错误 |
+| 本机工具定义 | `tools/local.py` | 将文件和 Shell 能力注册为工具 |
+| Environment | `adapters/local.py` | `LocalEnvironment` 负责本机路径、文件和 Shell 操作 |
+| Desktop | `adapters/windows_desktop.py` / `tools/desktop.py` | Windows 截图、输入、坐标映射与桌面工具注册 |
+| Applications | `adapters/windows_apps.py` / `tools/applications.py` | 查询 Windows 应用目录，返回候选、来源和不完整检查信息 |
+| Tracing | `tracing.py` | 控制台参数/耗时日志、脱敏及可选 JSONL 事件文件 |
 | 公共接口与数据 | `contracts.py` | 定义模型/环境接口及消息、调用、Observation |
-| 配置入口 | `main.py` | 读取配置和输入，将各模块装配起来 |
+| 共享校验 | `validation.py` | 校验应用名称、视觉问题和视觉结果 |
+| 配置入口 | `main.py` → `cli.py` | 启动、读取配置和输入，将各模块装配起来 |
 
 Runtime 中没有厂商 SDK、`subprocess` 或文件读写代码。
 模块通过统一数据类型交互，模型看不到处理函数或环境对象，只获得描述和真实反馈。
@@ -76,10 +125,10 @@ Runtime 中没有厂商 SDK、`subprocess` 或文件读写代码。
 Windows 下，下面这些操作均通过 `exec_command` 执行：
 
 ```powershell
-New-Item -ItemType Directory -Force -Path './examples'
+New-Item -ItemType Directory -Force -Path './work'
 Get-ChildItem -LiteralPath '.'
-python examples/fibonacci.py
-python -m unittest -v
+python -c "print(sum(range(1, 101)))"
+python -m unittest discover -s tests -t . -v
 ```
 
 每次调用启动新的 Shell，变量和 `cd` 不会跨调用保留。
@@ -106,10 +155,10 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from agent import Agent
-from environment import LocalEnvironment
-from model import OpenAICompatibleModel
-from tools import create_default_registry
+from core.agent import Agent
+from adapters.local import LocalEnvironment
+from adapters.models import OpenAICompatibleModel
+from tools.local import create_default_registry
 
 load_dotenv()
 with OpenAI(
@@ -198,8 +247,8 @@ PyCharm：项目解释器选 Conda `agent`，运行配置的**脚本参数**填�
 > 打开记事本，输入“你好，这是桌面 Agent 测试”，保存到桌面的 nitty-desktop-demo.txt，
 > 再打开文件管理器，确认该文件出现。若同名文件已存在，另取一个新名字。
 
-桌面模式默认使用 `direct`，提供 9 个桌面工具，默认最多 50 轮。
-`separate` 模式额外提供 `desktop_ask`，共 10 个桌面工具。
+桌面模式默认使用 `direct`，提供 9 个桌面工具和只读 `app_find`，共 10 个工具，默认最多 50 轮。
+`separate` 模式额外提供 `desktop_ask`，共 11 个工具。
 要同时提供原来的文件和 Shell 工具，可加 `--with-local-tools`：
 
 ```powershell
@@ -208,6 +257,7 @@ conda run --no-capture-output -n agent python main.py --desktop --with-local-too
 
 | 工具 | 用途 |
 | --- | --- |
+| `app_find(name)` | 查询开始菜单应用注册、AppX 包、快捷方式和卸载注册信息；不启动应用 |
 | `desktop_screenshot()` | 获取主屏幕截图、尺寸、前台窗口和 `frame_id` |
 | `desktop_click(frame_id, x, y, button="left", clicks=1)` | 单击、双击或右击 |
 | `desktop_move(frame_id, x, y)` | 鼠标悬停 |
@@ -222,6 +272,64 @@ conda run --no-capture-output -n agent python main.py --desktop --with-local-too
 执行流程：`截图 → 模型选择一个动作 → 输入 → 等待界面响应 → 新截图 → 模型继续`。
 首次模型请求前先检查截图能否取得；检查失败会直接报错。
 默认动作后等待 0.4 秒；页面仍在加载时，模型可调用 `desktop_wait`。
+
+### 应用查找与操作回退
+
+打开图形应用优先从开始菜单或任务栏操作；界面找不到或需要核实安装信息时，使用 `app_find`。
+即使开启 `--with-local-tools`，也不应连续猜安装路径。Shell 查询无结果或失败时，
+回到开始菜单搜索并观察；启动命令成功后仍需通过界面确认目标窗口。
+
+`app_find` 会分别查询当前用户的开始菜单应用、AppX/MSIX 包、用户/公共开始菜单与桌面快捷方式、
+HKCU/HKLM 的普通应用卸载信息（含 32 位路径）。名称按文字和数字匹配，忽略空格与标点，
+因此 `Telegram Desktop` 也能匹配包名中的 `TelegramDesktop`。不会执行全盘扫描。
+每个来源默认最多等待 10 秒，并在各来源之间检查取消；每个来源最多返回 30 个候选，超出时标记不完整。
+查询通过显式绑定的执行器运行固定只读脚本，即使没有向模型开放 `exec_command` 也可使用。
+
+返回值包含 `status`、`matches`、`checked_sources`、`attempted_sources`、`complete`、`errors` 和 `scope`：
+
+- `found`：至少发现一条注册记录或快捷方式；不保证应用仍能启动。其他来源失败时，仍保留候选并返回 `complete=false`。
+- `not_found`：所有来源检查完成，但没有匹配项；仅表示该范围未找到，不能推断“没有安装”。便携应用可能不在应用目录中。
+- `incomplete`：没有候选，且存在超时、权限错误、无效输出或截断；不能当作完整的空结果。
+
+`checked_sources` 只列出完整检查的来源；`attempted_sources` 列出尝试过的来源。
+不同来源可能指向同一应用，同名不同路径也可能代表不同应用；工具保留这些候选，不自行启动或选择。
+该状态由查询代码确定，最终回答与 GUI 回退仍由模型遵循工具规则完成，提示词不保证模型绝不误判。
+
+从 Python 单独注册应用查询，不需要让文件环境或桌面控制器增加新属性：
+
+```python
+from adapters.windows_apps import WindowsApplicationCatalog
+from tools.applications import register_application_tools
+
+catalog = WindowsApplicationCatalog(environment.exec_command)
+register_application_tools(registry, catalog)
+```
+
+### 运行日志与排查
+
+控制台会显示工具参数（包括实际 Shell 命令）、结果和耗时；超时和截断仍保留在结果中。
+`timed_out=true` 即使同时出现 `exit_code=0` 也表示未完成，空输出不能作为目标不存在的证明。
+
+需要保留运行过程时，指定一个尚不存在的日志文件：
+
+```powershell
+conda run --no-capture-output -n agent python main.py --desktop --with-local-tools --trace-file .agent-logs/desktop-run-01.jsonl
+```
+
+在 PyCharm 的脚本参数中填写相同选项即可。相对日志路径以启动目录为基准，与 `--workdir` 分开；
+文件独占新建，不覆盖已有日志。每条 JSONL 事件立即写入，包含运行 ID、时间、轮次、调用 ID、参数、
+结果和耗时；取消、拒绝执行的批次及运行失败有独立标记。模型事件仅记录调用时间及工具数量，
+不保存完整提示词、用户任务或推理内容。`completed` 表示模型已结束本轮任务，不能视为业务目标经外部验证成功。
+
+控制台和 JSONL 共用脱敏逻辑：遮蔽已知环境凭证、常见密码/令牌字段及赋值；
+`desktop_type_text.text` 和 `write_file.content` 默认全部遮蔽。图片仅记录类型和编码长度。
+脱敏不改变真正执行的参数、模型反馈或内存中的 `last_state`。
+任意自然语言或经过变换的秘密无法保证自动识别，命令输出也可能含业务内容，分享日志前应检查。
+默认建议的 `.agent-logs/` 和 `*.trace.jsonl` 已加入 Git 忽略；其他自定义路径需自行管理。
+
+自定义工具可以通过 `registry.register(..., sensitive_parameters=("text",))` 指定敏感参数，
+这些元数据仅用于日志，不传给模型。Python 调用方可在 `with JsonlTrace(path) as trace:` 中将
+`trace=trace` 传给 `Agent`，或注入实现 `EventSink.emit(event)` 的其他接收器。
 
 ### 两种视觉模式
 
@@ -329,9 +437,9 @@ F8 是全局急停键：一旦检测到就锁存，停止后续输入；若模�
 Python API 中，桌面控制器的生命周期和急停检查由调用方接入：
 
 ```python
-from desktop import WindowsDesktop
-from desktop_tools import register_desktop_tools
-from tools import ToolRegistry
+from adapters.windows_desktop import WindowsDesktop
+from tools.desktop import register_desktop_tools
+from core.tooling import ToolRegistry
 
 # model 使用前文已经配置好的支持图片输入的适配器。
 with WindowsDesktop() as desktop:
@@ -347,8 +455,8 @@ with WindowsDesktop() as desktop:
 分离模式的 Python API：
 
 ```python
-from model import TextOnlyModel
-from vision import ModelVisionAdapter
+from adapters.models import TextOnlyModel
+from adapters.vision import ModelVisionAdapter
 
 # planner_model 与 vlm_model 是调用方分别创建并管理的模型适配器。
 with WindowsDesktop() as desktop:
@@ -366,7 +474,7 @@ Python 调用方须搭配 `TextOnlyModel`，确保纯文本主模型不接收图
 ## 本地验证
 
 ```powershell
-conda run --no-capture-output -n agent python -m unittest -v
+conda run --no-capture-output -n agent python -m unittest discover -s tests -t . -v
 ```
 
 测试不联网，覆盖自定义模型和工具、内存环境替换、协议转换、错误恢复、
@@ -374,18 +482,11 @@ conda run --no-capture-output -n agent python -m unittest -v
 桌面测试使用替身后端，不移动真实鼠标或向应用输入内容；覆盖缩放、过期观察、
 多调用拦截、图片历史裁剪、协议序列化、急停和输入释放。
 另覆盖桌面控制器显式绑定、工具规则随定义传递及共享规则去重。
-`test_vision.py` 覆盖纯文本主模型隔离、按需定位与验证、视觉结果校验、过期截图、
+`tests/test_vision.py` 覆盖纯文本主模型隔离、按需定位与验证、视觉结果校验、过期截图、
 VLM 请求期间急停、不同模型独立配置及两种模式的 CLI 装配。
 OpenAI/Claude 适配器使用模拟服务响应。
-
-可单独运行真实 DeepSeek 图片协议验证（会产生少量 API 用量）：
-
-```powershell
-conda run --no-capture-output -n agent python -m examples.vision_smoke
-```
-
-该脚本生成一张随机六位数字的图片，要求模型先调用工具获取图片再识别，
-验证 `ToolResult → Runtime → ModelAdapter → DeepSeek` 全链路，不读取真实桌面。
+单独运行一组测试，例如 `conda run --no-capture-output -n agent python -m unittest tests.test_vision -v`。
+在 PyCharm 中也可为 `tests` 目录创建 unittest 运行配置，工作目录设为项目根目录。
 
 当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮；未实现交互式 Shell、自动加载 `AGENTS.md`、
 历史压缩或持久化恢复。文件和命令在本机以当前用户权限执行。

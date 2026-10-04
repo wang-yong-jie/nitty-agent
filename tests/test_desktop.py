@@ -13,49 +13,17 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from agent import Agent
-from context import ContextBuilder
+from core.agent import Agent
+from core.context import ContextBuilder
 from contracts import AgentCancelled, ImageContent, Message, ModelReply, ToolResult
-from desktop import Frame, WindowsDesktop, _WindowsBackend
-from desktop_tools import DESKTOP_INSTRUCTIONS, register_desktop_tools
-from environment import LocalEnvironment
-from model import ClaudeModel, OpenAICompatibleModel
-from state import AgentState
-from test_main import MemoryEnvironment, SequenceModel, call, sdk_response
-from tools import ToolExecutor, ToolRegistry, create_default_registry
-
-
-class FakeBackend:
-    key_names = {"ctrl", "alt", "shift", "s", "a", "enter", "tab", "f8", "win"}
-
-    def __init__(self):
-        self.screen = (0, 0, 1280, 720)
-        self.window = 123
-        self.sent = []
-        self.cancelled = False
-        self.closed = False
-        self.fail_capture = False
-
-    def geometry(self):
-        return self.screen
-
-    def foreground(self):
-        return {"handle": self.window, "title": "测试窗口"}
-
-    def capture(self, geometry):
-        if self.fail_capture:
-            raise OSError("capture failed")
-        return Image.new("RGB", geometry[2:], "white")
-
-    def check_cancelled(self):
-        if self.cancelled:
-            raise AgentCancelled("F8")
-
-    def send(self, action, arguments):
-        self.sent.append((action, arguments))
-
-    def close(self):
-        self.closed = True
+from adapters.windows_desktop import Frame, WindowsDesktop, _WindowsBackend
+from tools.desktop import DESKTOP_INSTRUCTIONS, register_desktop_tools
+from adapters.local import LocalEnvironment
+from adapters.models import ClaudeModel, OpenAICompatibleModel
+from core.state import AgentState
+from tests.fakes import FakeBackend, MemoryEnvironment, SequenceModel, call, sdk_response
+from core.tooling import ToolExecutor, ToolRegistry
+from tools.local import create_default_registry
 
 
 class DesktopTests(unittest.TestCase):
@@ -102,7 +70,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_rejects_old_frame_even_when_focus_unchanged(self):
         frame_id = self.frame_id()
-        with patch("desktop.time.monotonic", return_value=self.desktop.frame.captured_at + 121):
+        with patch("adapters.windows_desktop.time.monotonic", return_value=self.desktop.frame.captured_at + 121):
             with self.assertRaisesRegex(ValueError, "过时"):
                 self.desktop.perform("click", frame_id=frame_id, x=5, y=5)
         self.assertEqual(self.backend.sent, [])
@@ -328,7 +296,7 @@ class ImageProtocolTests(unittest.TestCase):
 
     def test_claude_images_inside_paired_tool_result(self):
         response = {"stop_reason": "end_turn", "content": [{"type": "text", "text": "done"}]}
-        with patch("model.urlopen", return_value=BytesIO(json.dumps(response).encode())) as transport:
+        with patch("adapters.models.urlopen", return_value=BytesIO(json.dumps(response).encode())) as transport:
             ClaudeModel("test-key", "vision").generate([
                 Message("user", "task"),
                 Message("assistant", tool_calls=[call("a", "screen", {}), call("b", "other", {})]),
@@ -414,7 +382,7 @@ class NativeInputTests(unittest.TestCase):
 
 class DesktopCliTests(unittest.TestCase):
     def test_desktop_mode_configuration_and_cleanup(self):
-        import main
+        import cli as main
 
         with (
             patch("sys.argv", ["main.py", "--desktop", "--max-turns", "75"]),
@@ -422,14 +390,15 @@ class DesktopCliTests(unittest.TestCase):
             patch.dict("os.environ", {"DEEPSEEK_API_KEY": "test"}),
             patch.object(main, "load_dotenv"), patch.object(main, "OpenAI"),
             patch.object(main, "Agent") as agent,
-            patch("desktop.WindowsDesktop") as desktop,
+            patch("adapters.windows_desktop.WindowsDesktop") as desktop,
             redirect_stdout(StringIO()),
         ):
             agent.return_value.run.return_value = "done"
             main.main()
         args, kwargs = agent.call_args
         names = {tool.name for tool in args[1].specs()}
-        self.assertEqual(len(names), 9)
+        self.assertEqual(len(names), 10)
+        self.assertIn("app_find", names)
         self.assertNotIn("exec_command", names)
         self.assertEqual(kwargs["max_turns"], 75)
         self.assertIs(args[2].desktop, desktop.return_value.__enter__.return_value)
