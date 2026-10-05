@@ -274,6 +274,93 @@
             "description": "Internal Server Error"
           }
         }
+      },
+      "delete": {
+        "summary": "Delete Session",
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDeleteResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
       }
     },
     "/api/sessions/{session_id}/tasks": {
@@ -654,6 +741,97 @@
                 }
               }
             }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}/artifacts/{filename}": {
+      "get": {
+        "summary": "Desktop Artifact",
+        "operationId": "get_desktop_artifact",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Filename"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
           },
           "400": {
             "content": {
@@ -1286,6 +1464,25 @@
             "minimum": 640.0,
             "title": "Screenshot Size",
             "default": 1600
+          },
+          "stability_timeout": {
+            "type": "number",
+            "maximum": 10.0,
+            "minimum": 0.5,
+            "title": "Stability Timeout",
+            "default": 3
+          },
+          "desktop_recovery_limit": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 3.0,
+            "title": "Desktop Recovery Limit",
+            "default": 6
+          },
+          "record_desktop": {
+            "type": "boolean",
+            "title": "Record Desktop",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -1305,6 +1502,29 @@
         "additionalProperties": false,
         "type": "object",
         "title": "SessionCreate"
+      },
+      "SessionDeleteResult": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "deleted_tasks": {
+            "type": "integer",
+            "title": "Deleted Tasks"
+          },
+          "retained_logs": {
+            "type": "integer",
+            "title": "Retained Logs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "deleted_tasks",
+          "retained_logs"
+        ],
+        "title": "SessionDeleteResult"
       },
       "SessionRecord": {
         "properties": {
@@ -1545,6 +1765,16 @@
               }
             ],
             "title": "Stop Reason"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -1564,6 +1794,53 @@
           "stop_reason"
         ],
         "title": "TaskRecord"
+      },
+      "VerificationRecord": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "achieved",
+              "unmet",
+              "uncertain"
+            ],
+            "title": "Status"
+          },
+          "expected": {
+            "type": "string",
+            "title": "Expected"
+          },
+          "evidence": {
+            "type": "string",
+            "title": "Evidence"
+          },
+          "frame_id": {
+            "type": "string",
+            "title": "Frame Id"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "step",
+              "task"
+            ],
+            "title": "Scope"
+          },
+          "duration_ms": {
+            "type": "number",
+            "title": "Duration Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "expected",
+          "evidence",
+          "frame_id",
+          "scope",
+          "duration_ms"
+        ],
+        "title": "VerificationRecord"
       }
     }
   }

@@ -1,14 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Alert, App as AntApp, Button, Card, Empty, Input, Spin, Tag, Typography } from 'antd';
-import { active, api, apiError, formatTime, mergeTasks, statusLabels } from './api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, App as AntApp, Button, Card, Input, Spin, Tag } from 'antd';
+import { active, api, apiError, mergeTasks, statusLabels } from './api/client';
 import type { Capabilities, RunOptions, Task } from './api/client';
 import RunSettings, { defaultOptions } from './components/RunSettings';
-import EventTimeline from './components/EventTimeline';
 import { useTaskEvents } from './hooks/useTaskEvents';
 import { useSessions } from './hooks/useSessions';
 import ConversationPanel from './components/ConversationPanel';
-
-const { Paragraph } = Typography;
+import TaskExecutionDetails from './components/TaskExecutionDetails';
+import SessionHistory from './components/SessionHistory';
 
 function Status({ task }: { task: Task }) {
   const color = task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error'
@@ -22,7 +21,9 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => new URLSearchParams(location.search).get('task'));
   const [sessionId, setSessionId] = useState<string | null>(() => new URLSearchParams(location.search).get('session'));
   const [followUp, setFollowUp] = useState('');
-  const { sessions, error: sessionError, refresh: refreshSessions } = useSessions();
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const { sessions, error: sessionError, refresh: refreshSessions, remove: removeSession } = useSessions();
+  const deletedSessions = useRef(new Set<string>());
   const [draft, setDraft] = useState('');
   const [options, setOptions] = useState<RunOptions>(defaultOptions);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
@@ -32,14 +33,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const selected = tasks.find(task => task.id === selectedId);
   const currentSessionId = selected?.session_id ?? sessionId;
+  const currentSessionRef = useRef(currentSessionId);
+  currentSessionRef.current = currentSessionId;
   const conversation = tasks.filter(task => task.session_id === currentSessionId && !!currentSessionId)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
   const running = tasks.find(task => active(task));
 
+  const mergeVisibleTasks = useCallback((previous: Task[], incoming: Task[]) => (
+    mergeTasks(previous, incoming).filter(task => !deletedSessions.current.has(task.session_id ?? ''))
+  ), []);
   const updateTask = useCallback((task: Task) => {
-    setTasks(previous => mergeTasks(previous, [task]));
-  }, []);
-  const { events, connection } = useTaskEvents(selectedId, updateTask);
+    setTasks(previous => mergeVisibleTasks(previous, [task]));
+  }, [mergeVisibleTasks]);
+  const currentEvents = useTaskEvents(selectedId, updateTask);
 
   const selectTask = useCallback((id: string | null) => {
     setSelectedId(id);
@@ -52,8 +58,10 @@ export default function App() {
     try {
       const response = await api.GET('/api/sessions/{session_id}/tasks', { params: { path: { session_id: id } } });
       if (response.error) throw response.error;
+      if (deletedSessions.current.has(id)) return;
       setSessionId(id); setFollowUp(''); setDraft('');
-      setTasks(previous => mergeTasks(previous, response.data ?? []));
+      setDetailId(null);
+      setTasks(previous => mergeVisibleTasks(previous, response.data ?? []));
       selectTask(response.data?.at(-1)?.id ?? null);
       const record = sessions.find(session => session.id === id);
       if (record?.options) setOptions(record.options);
@@ -61,7 +69,24 @@ export default function App() {
       url.searchParams.set('session', id);
       history.replaceState(null, '', url);
     } catch (failure) { void message.error(apiError(failure)); }
-  }, [message, selectTask, sessions]);
+  }, [message, selectTask, sessions, mergeVisibleTasks]);
+
+  async function deleteSession(id: string) {
+    try {
+      const result = await removeSession(id);
+      deletedSessions.current.add(id);
+      setTasks(previous => previous.filter(task => task.session_id !== id));
+      setDetailId(previous => tasks.find(task => task.id === previous)?.session_id === id ? null : previous);
+      if (currentSessionRef.current === id) {
+        setSessionId(null); selectTask(null); setFollowUp(''); setDraft(''); setOptions(defaultOptions); setError(null);
+        const url = new URL(location.href);
+        url.searchParams.delete('session'); url.searchParams.delete('task');
+        history.replaceState(null, '', url);
+      }
+      if (result?.retained_logs) void message.warning(`会话已删除，但有 ${result.retained_logs} 个运行日志文件未能清理。`);
+      else void message.success('会话已删除。');
+    } catch (failure) { void message.error(apiError(failure)); }
+  }
 
   async function newSession(copy?: Task) {
     try {
@@ -69,6 +94,7 @@ export default function App() {
       if (response.error) throw response.error;
       if (!response.data) return;
       setSessionId(response.data.id); selectTask(null); setFollowUp('');
+      setDetailId(null);
       setDraft(copy?.task ?? ''); setOptions(copy?.options ?? defaultOptions);
       const url = new URL(location.href);
       url.searchParams.set('session', response.data.id);
@@ -81,24 +107,24 @@ export default function App() {
     if (!currentSessionId) return;
     let disposed = false;
     void api.GET('/api/sessions/{session_id}/tasks', { params: { path: { session_id: currentSessionId } } }).then(response => {
-      if (disposed) return;
+      if (disposed || deletedSessions.current.has(currentSessionId)) return;
       if (response.error) setError(apiError(response.error));
       else {
-        setTasks(previous => mergeTasks(previous, response.data ?? []));
+        setTasks(previous => mergeVisibleTasks(previous, response.data ?? []));
         if (!selectedId && response.data?.length) selectTask(response.data.at(-1)!.id);
       }
     }).catch(failure => { if (!disposed) setError(apiError(failure)); });
     return () => { disposed = true; };
-  }, [currentSessionId, selectedId, selectTask]);
+  }, [currentSessionId, selectedId, selectTask, mergeVisibleTasks]);
 
   const refresh = useCallback(async () => {
     try {
       const response = await api.GET('/api/tasks');
       if (response.error) throw response.error;
-      setTasks(previous => mergeTasks(previous, response.data ?? []));
+      setTasks(previous => mergeVisibleTasks(previous, response.data ?? []));
       setError(null);
     } catch (failure) { setError(apiError(failure)); }
-  }, []);
+  }, [mergeVisibleTasks]);
 
   useEffect(() => {
     let disposed = false;
@@ -110,7 +136,7 @@ export default function App() {
         if (taskResponse.error) throw taskResponse.error;
         if (configResponse.error) throw configResponse.error;
         if (disposed) return;
-        setTasks(previous => mergeTasks(previous, taskResponse.data ?? []));
+        setTasks(previous => mergeVisibleTasks(previous, taskResponse.data ?? []));
         setCapabilities(configResponse.data ?? null);
         const id = new URLSearchParams(location.search).get('task');
         if (id && !taskResponse.data?.some(task => task.id === id)) {
@@ -125,7 +151,7 @@ export default function App() {
     void load();
     const interval = window.setInterval(() => { if (!disposed) void refresh(); }, 3000);
     return () => { disposed = true; window.clearInterval(interval); };
-  }, [refresh, selectTask, updateTask]);
+  }, [refresh, selectTask, updateTask, mergeVisibleTasks]);
 
   async function submit() {
     setSubmitting(true);
@@ -171,25 +197,19 @@ export default function App() {
         <span className="brand-symbol">n</span><div><strong>nitty<span>agent</span></strong><small>本地工作空间</small></div>
       </a>
       <Button block className="new-task" onClick={() => void newSession()}>＋ 新建会话</Button>
-      <div className="sidebar-label">会话历史 <span>{sessions.length}</span></div>
-      <nav aria-label="会话历史" className="history">
-        {sessions.length ? sessions.map(session => <button key={session.id} className={`history-item ${session.id === currentSessionId ? 'selected' : ''}`}
-          onClick={() => void selectSession(session.id)}>
-          <span className="history-dot" />
-          <div><strong>{session.title}</strong><small>{formatTime(session.updated_at)}</small></div>
-        </button>) : <p className="history-empty">你的第一个任务<br />会出现在这里</p>}
-      </nav>
+      <SessionHistory sessions={sessions} selectedId={currentSessionId} onSelect={id => void selectSession(id)}
+        onDelete={deleteSession} activeSessionIds={new Set(tasks.filter(task => active(task)).flatMap(task => task.session_id ? [task.session_id] : []))} />
       <div className="sidebar-footer"><span className="online-dot" /><div>运行于本机<small>任务与日志保存在本地</small></div></div>
     </aside>
 
     <main className="workspace">
-      <header className="workspace-header"><div className="breadcrumb">工作空间 <span>/</span> {selected ? '任务详情' : '新建任务'}</div>
+      <header className="workspace-header"><div className="breadcrumb">工作空间 <span>/</span> {selected ? '当前会话' : '新建任务'}</div>
         <span className="local-badge"><span className="online-dot" /> LOCAL</span></header>
       <div className="workspace-body">
         {(error || sessionError) && <Alert type="error" title={error || sessionError} showIcon action={<Button size="small" onClick={() => location.reload()}>重新连接</Button>} />}
         {loading ? <div className="loading"><Spin size="large" /><p>正在连接本地 Agent…</p></div> : <>
-          <div className="page-title"><div><div className="eyebrow">AGENT CONSOLE</div><h1>{selected ? '任务详情' : '让 Agent 开始工作'}</h1>
-            <p>{selected ? '查看执行进度、工具调用和最终结果。' : '描述你的目标，Agent 会调用工具逐步完成任务。'}</p></div>
+          <div className="page-title"><div><div className="eyebrow">AGENT CONSOLE</div><h1>{selected ? '当前会话' : '让 Agent 开始工作'}</h1>
+            <p>{selected ? '查看历史问答，继续提问；每次执行的详细过程可单独打开。' : '描述你的目标，Agent 会调用工具逐步完成任务。'}</p></div>
             {selected && <Status task={selected} />}</div>
 
           {!selected ? <div className="compose-grid">
@@ -214,43 +234,18 @@ export default function App() {
               <p className="settings-footnote">设置只应用于下一次提交的任务。</p>
             </Card>
           </div> : <>
-            {currentSessionId && <ConversationPanel tasks={conversation} selectedId={selected.id} draft={followUp}
-              onDraft={setFollowUp} onSelect={selectTask} onSubmit={() => void submitFollowUp()}
+            {currentSessionId && <ConversationPanel tasks={conversation} draft={followUp}
+              onDraft={setFollowUp} onSelect={setDetailId} onSubmit={() => void submitFollowUp()}
+              onStop={task => void stop(task)} stopping={stopping}
               omittedMessages={sessions.find(session => session.id === currentSessionId)?.omitted_messages ?? 0}
               submitting={submitting} disabled={!!running || !capabilities} />}
-            <Card className="task-detail"><div className="task-description"><Paragraph copyable>{selected.task}</Paragraph></div>
-              <div className="task-facts"><span>{selected.options.provider} <code>{selected.options.model || 'deepseek-flash'}</code></span>
-                <span>{selected.options.desktop ? '桌面模式' : '文件与 Shell'}</span><span>开始于 {formatTime(selected.started_at)}</span>
-                <span>{selected.turn || events.reduce((turn, event) => Math.max(turn, typeof event.data.turn === 'number' ? event.data.turn : 0), 0)} 轮</span>
-              </div>
-              {selected.options.workdir && <div className="workdir">工作目录 <code>{selected.options.workdir}</code></div>}
-              <div className="detail-actions"><Button onClick={() => void newSession(selected)}>复制为新任务</Button>
-                {active(selected) && <Button danger loading={stopping} disabled={selected.status === 'stopping'}
-                  onClick={() => void stop(selected)}>{selected.status === 'stopping' ? '正在停止…' : '停止任务'}</Button>}
-              </div></Card>
-
-            {selected.status === 'stopping' && <Alert className="below-card" type="info" showIcon title="正在等待当前调用结束"
-              description="取消信号已发送。正在进行的模型请求或 Shell 命令返回后，Agent 会在下一个检查点停止。" />}
-            {selected.error && <Alert className="below-card" showIcon type={selected.status === 'failed' ? 'error' : 'warning'}
-              title={selected.error} description={selected.error_info && <span>错误代码 <code>{selected.error_info.code}</code> · 阶段 {selected.error_info.phase}
-                {selected.error_info.side_effects === 'possible' && ' · 操作可能已经产生部分影响'}</span>} />}
-            <div className="results-grid">
-              <Card title="执行时间线" className="timeline-card" extra={<span className="connection-label">
-                {connection === 'connected' ? '● 实时更新' : connection === 'reconnecting' ? '重新连接中…' : connection === 'connecting' ? '正在连接…' : '执行记录'}</span>}>
-                <EventTimeline events={events} /></Card>
-              <div className="result-column"><Card title="最终回答" className="answer-card">
-                {selected.answer ? <Paragraph className="answer-text" copyable>{selected.answer}</Paragraph>
-                  : active(selected) ? <div className="answer-pending"><Spin /><p>Agent 正在处理任务</p><small>最终回答将在任务完成后显示</small></div>
-                    : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此任务没有最终回答" />}
-              </Card><Card size="small" className="diagnostic-card" title="运行信息">
-                <dl><dt>任务 ID</dt><dd>{selected.id}</dd><dt>运行 ID</dt><dd>{selected.run_id ?? '等待生成'}</dd>
-                  <dt>结束原因</dt><dd>{selected.stop_reason ?? '执行中'}</dd><dt>结束时间</dt><dd>{formatTime(selected.finished_at)}</dd></dl>
-              </Card></div>
-            </div>
           </>}
         </>}
         <footer className="workspace-footer">Nitty Agent <span>本地执行 · 可追踪的每一步</span></footer>
       </div>
     </main>
+    <TaskExecutionDetails task={tasks.find(task => task.id === detailId)} currentTaskId={selectedId}
+      currentEvents={currentEvents} onTask={updateTask} onClose={() => setDetailId(null)}
+      onCopy={task => void newSession(task)} onStop={task => void stop(task)} stopping={stopping} />
   </div>;
 }

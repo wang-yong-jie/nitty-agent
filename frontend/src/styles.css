@@ -14,6 +14,10 @@ button, input, textarea { font: inherit; }
 .history { overflow-y: auto; flex: 1; }
 .history-item { width: 100%; border: 0; background: none; padding: 13px 10px; display: flex; gap: 10px; text-align: left; border-radius: 9px; cursor: pointer; margin-bottom: 4px; }
 .history-item:hover { background: #f8f8fc; }.history-item.selected { background: #eff0fa; }
+.history-row { display: flex; align-items: center; border-radius: 9px; margin-bottom: 4px; }
+.history-row:hover { background: #f8f8fc; }.history-row.selected { background: #eff0fa; }
+.history-row .history-item { flex: 1; width: 0; min-width: 0; max-width: none; margin-bottom: 0; padding-right: 4px; }
+.history-delete.ant-btn { flex-shrink: 0; margin-right: 3px; font-size: 11px; padding-inline: 5px; }
 .history-item div { min-width: 0; }.history-item strong { font-size: 12px; font-weight: 500; color: #464b60; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .history-item small { font-size: 10px; color: #9297a5; display: block; margin-top: 7px; }
 .history-dot { width: 6px; height: 6px; margin-top: 6px; background: #a6aaba; border-radius: 50%; flex-shrink: 0; }
@@ -50,9 +54,41 @@ h1 { font-size: 27px; font-weight: 600; letter-spacing: -.5px; margin: 0 0 10px;
 .history-notice { margin-bottom: 20px; }
 .conversation-turn { border-bottom: 1px solid #eff0f5; margin-bottom: 20px; padding-bottom: 16px; }
 .conversation-question, .conversation-answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.9; }
-.conversation-question strong, .conversation-answer strong { color: #858a9a; font-size: 11px; }
+.conversation-question > strong, .conversation-answer > strong { color: #858a9a; font-size: 11px; }
 .conversation-question { background: #f7f8fc; padding: 12px 16px; border-radius: 8px; }
 .conversation-answer { padding: 12px 16px 0; }
+.conversation-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.verification-notice { margin: 12px 0; white-space: normal; }.verification-notice small { display: block; margin-top: 6px; color: #72798c; }
+.visual-step { margin-bottom: 14px; }.visual-step-facts { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: #747b8d; }
+.visual-step-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.visual-step-images figure { margin: 0; min-width: 0; }.visual-step-images img { max-width: 100%; border: 1px solid #e8eaf1; border-radius: 6px; }
+.visual-step-images figcaption { font-size: 11px; color: #747b8d; margin-top: 6px; }
+.markdown-answer.ant-typography { white-space: normal; overflow-wrap: anywhere; line-height: 1.85; margin: 4px 0 14px; }
+.markdown-answer h1, .markdown-answer h2, .markdown-answer h3, .markdown-answer h4, .markdown-answer h5, .markdown-answer h6 {
+  color: #242735; font-weight: 600; line-height: 1.5; margin: 22px 0 12px; letter-spacing: normal;
+}
+.markdown-answer h1 { font-size: 24px; }.markdown-answer h2 { font-size: 20px; }.markdown-answer h3 { font-size: 17px; }
+.markdown-answer h4, .markdown-answer h5, .markdown-answer h6 { font-size: 14px; }
+.markdown-answer > :first-child { margin-top: 0; }
+.markdown-answer p { margin: 0 0 12px; }
+.markdown-answer strong { font-weight: 600; }
+.markdown-answer ul, .markdown-answer ol { padding-left: 24px; margin: 0 0 12px; }
+.markdown-answer li + li { margin-top: 4px; }.markdown-answer li > p { margin: 6px 0; }
+.markdown-answer li > ul, .markdown-answer li > ol { margin: 6px 0; }
+.markdown-answer blockquote { margin: 14px 0; padding: 8px 16px; border-left: 3px solid #b7bae6; background: #f7f8fc; color: #666e83; }
+.markdown-answer blockquote > :last-child { margin-bottom: 0; }
+.markdown-answer code { font-family: Consolas, "Cascadia Code", monospace; font-size: .9em; background: #f0f1f7; border-radius: 4px; padding: 2px 5px; }
+.markdown-answer pre { max-width: 100%; overflow-x: auto; padding: 14px 16px; margin: 14px 0; border: 1px solid #e8eaf1; border-radius: 8px; background: #f7f8fc; line-height: 1.65; white-space: pre; overflow-wrap: normal; }
+.markdown-answer pre code { background: none; padding: 0; border-radius: 0; font-size: 13px; white-space: inherit; }
+.markdown-table { max-width: 100%; overflow-x: auto; margin: 14px 0; }
+.markdown-table table { width: 100%; min-width: 360px; border-collapse: collapse; font-size: 13px; }
+.markdown-table th, .markdown-table td { padding: 9px 12px; border: 1px solid #e3e6ef; text-align: left; }
+.markdown-table th { font-weight: 600; background: #f3f4fa; }.markdown-table tbody tr:nth-child(even) { background: #fafbfe; }
+.markdown-answer a { color: #4f55c5; text-decoration: underline; text-underline-offset: 2px; }
+.markdown-answer img { max-width: 100%; height: auto; }
+.markdown-answer hr { margin: 20px 0; border: 0; border-top: 1px solid #e8eaf1; }
+.markdown-answer .contains-task-list { list-style: none; padding-left: 4px; }.markdown-answer .task-list-item input { margin-right: 8px; }
+@media (max-width: 850px) { .history-row { min-width: 220px; max-width: 250px; flex-shrink: 0; margin-right: 6px; } }
 @media (min-width: 1600px) { .workspace-body { padding-top: 52px; }.compose-grid { grid-template-columns: minmax(0, 1fr) 370px; } }
 @media (max-width: 1150px) { .sidebar { width: 210px; }.workspace { margin-left: 210px; width: calc(100% - 210px); }.workspace-body { padding: 28px 24px 0; }.workspace-header { padding: 0 24px; }.compose-grid { grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }.compose-actions { align-items: flex-end; }.compose-actions .muted { max-width: 130px; line-height: 1.7; }.results-grid { grid-template-columns: 1fr; }.guide-items { gap: 12px; } }
 @media (max-width: 850px) { .console-shell { flex-direction: column; }.sidebar { position: static; width: 100%; padding: 18px; border-right: 0; border-bottom: 1px solid #e8eaf0; }.brand { margin: 0 0 18px; }.sidebar-label { margin: 18px 0 8px; }.history { display: flex; overflow-x: auto; max-height: 95px; }.history-item { min-width: 190px; max-width: 230px; }.history-empty { padding: 4px 0; margin: 0; text-align: left; }.history-empty br { display: none; }.sidebar-footer { display: none; }.workspace { margin: 0; width: 100%; }.workspace-header { height: 55px; }.workspace-body { padding: 25px 18px 0; }.compose-grid { grid-template-columns: 1fr; }.page-title h1 { font-size: 24px; }.page-title p { line-height: 1.8; font-size: 12px; }.guide-items { grid-template-columns: 1fr; gap: 14px; }.guide-items span { display: inline; margin-right: 10px; }.guide-items p { margin: 5px 0 0 26px; }.task-card .ant-card-body { padding: 18px; }.compose-actions .muted { max-width: 155px; }.event-meta time { margin-left: 0; } }

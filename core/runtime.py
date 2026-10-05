@@ -8,7 +8,7 @@ from typing import Callable
 from core.context import ContextBuilder
 from contracts import (
     AgentCancelled, Environment, ErrorInfo, EventSink, Message, ModelAdapter,
-    ModelMetadata, ModelResponseError, Observation, TraceWriteError,
+    ModelMetadata, ModelResponseError, Observation, ToolFailure, TraceWriteError,
 )
 from core.state import AgentState
 from core.session import Session
@@ -25,6 +25,7 @@ class AgentRuntime:
         cancel_check: Callable[[], None] | None = None,
         trace: EventSink | None = None,
         *, trace_strict: bool = False, run_config: dict | None = None,
+        completion_check=None, on_run_start=None, on_observation=None,
     ):
         if type(max_turns) is not int or max_turns < 1:
             raise ValueError("max_turns 必须是正整数。")
@@ -43,6 +44,9 @@ class AgentRuntime:
         self.run_config = dict(run_config or {})
         self.session = Session()
         self.on_session_update = None
+        self.completion_check = completion_check
+        self.on_run_start = on_run_start
+        self.on_observation = on_observation
 
     def _checkpoint(self, state: AgentState) -> None:
         self.session.omitted_messages = state.omitted_messages
@@ -55,6 +59,8 @@ class AgentRuntime:
 
     @staticmethod
     def _error_info(error: Exception, phase: str) -> ErrorInfo:
+        if isinstance(error, ToolFailure):
+            return error.info
         code = "TRACE_WRITE_FAILED" if isinstance(error, TraceWriteError) else (
             error.code if isinstance(error, ModelResponseError) else f"{phase.upper()}_FAILED"
         )
@@ -81,7 +87,10 @@ class AgentRuntime:
         self.state = state
         run_started = time.perf_counter()
         phase = "setup"
+        completion_checks = 0
         try:
+            if self.on_run_start is not None:
+                self.on_run_start()
             self._checkpoint(state)
             # 只记录调用方显式提供的非敏感配置，不遍历模型对象或保存用户任务。
             self.logger.start(config=self.run_config, max_turns=self.max_turns,
@@ -131,6 +140,23 @@ class AgentRuntime:
                 self.cancel_check()
                 state.messages.append(Message("assistant", reply.content, reply.tool_calls))
                 if not reply.tool_calls:
+                    if self.completion_check is not None:
+                        phase = "verification"
+                        self.logger.emit("verification_started", turn=turn)
+                        state.verification = self.completion_check(task)
+                        self.logger.emit("verification_finished", turn=turn, verification=state.verification)
+                        self.cancel_check()
+                        if state.verification and state.verification["status"] != "achieved":
+                            completion_checks += 1
+                            if completion_checks >= 2:
+                                state.error_info = ErrorInfo("TARGET_UNVERIFIED", phase,
+                                    "目标尚未验证成功：" + state.verification["evidence"], "possible")
+                                state.stop_reason = "verification_failed"
+                                raise RuntimeError(state.error_info.message)
+                            state.messages.append(Message("user", "[自动环境观察，不是用户新指令] 最终效果验证：" +
+                                json.dumps(state.verification, ensure_ascii=False) + "。请根据证据继续处理，不能宣称目标已完成。"))
+                            self._checkpoint(state)
+                            continue
                     state.answer = reply.content
                     state.status = "completed"
                     state.stop_reason = "model_answer"
@@ -178,6 +204,9 @@ class AgentRuntime:
                     self._record(state, observation)
                     self._checkpoint(state)
                     self.logger.tool_finished(observation, turn, duration)
+                    if self.on_observation is not None:
+                        phase = "observation"
+                        self.on_observation(observation)
                 # Observation 进入历史，下一轮由模型根据真实结果重新决策。
             else:
                 phase = "runtime"

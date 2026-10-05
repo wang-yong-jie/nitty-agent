@@ -1,6 +1,7 @@
 """桌面工具及使用规则；注册时显式绑定 DesktopController。"""
 
 from dataclasses import asdict
+import time
 
 from contracts import DesktopController, ToolRejected, ToolResult, VisionAdapter
 from core.tooling import ToolRegistry
@@ -18,6 +19,9 @@ COMMON_DESKTOP_INSTRUCTIONS = (
     "动作反馈只表明输入已发送，不代表应用完成操作；依据后续截图确认结果。"
     "界面加载时调用 desktop_wait。动作错误后先重新截图，避免重复提交。"
     "最后根据截图验证目标已达到再回答；仅操作主显示器可见界面。"
+    "小目标先用 desktop_crop 从原图裁剪放大，使用裁剪返回的新 frame_id 和坐标。"
+    "画面 stable=false 时先等待；recovery 提示无进展时重新观察、放大定位或重新规划，不能盲目重试。"
+    "重要动作可提供 expected 描述预期变化；使用 desktop_verify 验证保存、提交等操作效果。"
 )
 
 
@@ -29,7 +33,7 @@ DESKTOP_INSTRUCTIONS = (
 SEPARATE_VISION_INSTRUCTIONS = (
     "你是纯文本规划模型，不能直接查看图片。需要了解屏幕时调用 desktop_ask(question)，"
     "明确询问与当前任务有关的问题，例如‘找到保存按钮，返回位置’或‘检查是否保存成功，说明可见证据’。"
-    "每次提问都会重新截图，VLM 只回答本次问题；需要定位和验证时可分别提问。"
+    "默认重新截图；传入最新 frame_id 可复用仍有效的观察。VLM 只回答本次问题。"
     "该工具返回视觉回答、目标坐标和对应 frame_id；不要猜测未返回的坐标。"
     "answered 仅表示问题可回答，不表示任务成功，必须阅读 answer 中的证据。"
     "not_found、ambiguous 或 uncertain 时不要猜目标，应澄清问题或等待后重新观察。"
@@ -42,6 +46,7 @@ SEPARATE_VISION_INSTRUCTIONS = (
 
 def register_desktop_tools(
     registry: ToolRegistry, desktop: DesktopController, *, vision: VisionAdapter | None = None,
+    workflow=None,
 ) -> None:
     """绑定调用方管理的控制器；不从 Environment 查找桌面能力，也不接管其生命周期。"""
     if desktop is None:
@@ -55,7 +60,25 @@ def register_desktop_tools(
         def handler(_environment, **arguments):
             if name == "screenshot":
                 return desktop.screenshot(**arguments)
-            return desktop.perform(name, **arguments)
+            if name == "crop":
+                return desktop.crop(**arguments)
+            expected = arguments.pop("expected", None)
+            result = desktop.perform(name, **arguments)
+            if expected and workflow is not None:
+                try:
+                    checked = workflow.verify(expected, result.data["frame_id"])
+                    result.data["verification"] = checked.data["verification"]
+                except ToolRejected as error:
+                    # 输入已经发出；观察失效不能伪装成无副作用的输入拒绝。
+                    result.data["stable"] = False
+                    result.data["verification"] = {"status": "uncertain", "expected": expected,
+                        "evidence": f"动作已发送，但验证画面失效；先重新观察，不要重复提交：{error}",
+                        "scope": "step", "frame_id": result.data["frame_id"], "duration_ms": 0}
+            return result
+
+        if name not in {"screenshot", "crop", "wait"}:
+            properties = {**properties, "expected": {"type": "string", "minLength": 1, "maxLength": 2000,
+                "description": "可选，描述操作后的可见预期结果，用于独立验证"}}
 
         registry.register(
             "desktop_" + name, description, properties, required, handler,
@@ -64,6 +87,10 @@ def register_desktop_tools(
         )
 
     add("screenshot", "获取主显示器截图及 frame_id。首次操作和出错后先调用；每轮仅调用一个桌面工具。", {}, [])
+    add("crop", "从最新截图的原图裁剪局部放大。返回新 frame_id，之后坐标相对于裁剪图，旧编号失效。", {
+        "frame_id": frame, "x": coord, "y": coord, "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+    }, ["frame_id", "x", "y", "width", "height"])
     add("click", "点击最新截图中的位置，可单击或双击；执行后返回新截图。", {
         "frame_id": frame, "x": coord, "y": coord, "button": button,
         "clicks": {"type": "integer", "enum": [1, 2]},
@@ -93,17 +120,18 @@ def register_desktop_tools(
     }, ["seconds"])
 
     if vision is not None:
-        def ask(_environment, question: str) -> ToolResult:
+        def ask(_environment, question: str, frame_id: str | None = None) -> ToolResult:
             try:
                 validate_question(question)
             except ValueError as error:
                 raise ToolRejected("INVALID_ARGUMENTS", str(error)) from error
-            screenshot = desktop.screenshot()
+            screenshot = desktop.observation(frame_id) if frame_id else desktop.screenshot()
             if len(screenshot.images) != 1:
                 raise ValueError("视觉提问需要一张桌面截图。")
             metadata = screenshot.data
             width, height = metadata["image_width"], metadata["image_height"]
             try:
+                started = time.perf_counter()
                 answer = vision.answer(question, screenshot.images[0], width=width, height=height)
                 validate_vision_answer(answer, width=width, height=height)
             finally:
@@ -111,11 +139,18 @@ def register_desktop_tools(
                 desktop.validate_frame(metadata["frame_id"])
             return ToolResult({
                 **metadata, "question": question, "vision": asdict(answer),
+                "vision_duration_ms": round((time.perf_counter() - started) * 1000, 2),
             }, images=screenshot.images)
 
         registry.register(
             "desktop_ask", "获取新截图并向独立 VLM 提问，用于目标定位、读取内容或验证操作结果；返回文字、坐标和 frame_id。",
             {"question": {"type": "string", "minLength": 1, "maxLength": 2000,
-                          "description": "针对当前界面的具体问题；定位时描述目标，验证时说明期望结果"}},
+                          "description": "针对当前界面的具体问题；定位时描述目标，验证时说明期望结果"}, "frame_id": frame},
             ["question"], ask, requires_single_call=True, instructions=instructions,
         )
+
+    if workflow is not None:
+        registry.register("desktop_verify", "独立验证预期结果，返回 achieved/unmet/uncertain 和可见证据。",
+            {"expected": {"type": "string", "minLength": 1, "maxLength": 2000}, "frame_id": frame},
+            ["expected"], lambda _environment, **arguments: workflow.verify(**arguments),
+            requires_single_call=True, instructions=instructions)

@@ -8,6 +8,8 @@ export type TaskEvent = components['schemas']['TaskEvent'];
 export type Capabilities = components['schemas']['Capabilities'];
 
 export const api = createClient<paths>();
+export const desktopArtifactUrl = (taskId: string, filename: string) =>
+  `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(filename)}`;
 
 export function apiError(error: unknown): string {
   if (error instanceof Error) return error.message;

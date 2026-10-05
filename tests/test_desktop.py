@@ -359,6 +359,28 @@ class NativeInputTests(unittest.TestCase):
         backend.gui.failSafeCheck.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Windows ABI")
+    def test_scroll_sends_complete_windows_wheel_notches(self):
+        backend = self.backend()
+        backend._setup_unicode_input()
+        backend.check_cancelled = Mock()
+        seen = []
+
+        def send(count, items, size):
+            self.assertEqual(count, 1)
+            seen.append((items[0].type, items[0].value.mi.flags,
+                         ctypes.c_int32(items[0].value.mi.data).value))
+            return count
+
+        backend.user32.SendInput.side_effect = send
+        backend.send("scroll", {"x": 40, "y": 50, "amount": -3})
+        backend.send("scroll", {"x": 40, "y": 50, "amount": 2})
+        self.assertEqual(seen, [(0, 0x0800, -360), (0, 0x0800, 240)])
+        backend.user32.SendInput.side_effect = None
+        backend.user32.SendInput.return_value = 0
+        with self.assertRaisesRegex(RuntimeError, "未接受滚轮"):
+            backend.send("scroll", {"x": 40, "y": 50, "amount": -1})
+
+    @unittest.skipUnless(os.name == "nt", "Windows ABI")
     def test_unicode_sendinput_layout_and_surrogate_pairs(self):
         backend = self.backend()
         backend._setup_unicode_input()
@@ -398,7 +420,8 @@ class DesktopCliTests(unittest.TestCase):
             main.main()
         args, kwargs = agent.call_args
         names = {tool.name for tool in args[1].specs()}
-        self.assertEqual(len(names), 10)
+        self.assertEqual(len(names), 12)
+        self.assertTrue({"desktop_crop", "desktop_verify"}.issubset(names))
         self.assertIn("app_find", names)
         self.assertNotIn("exec_command", names)
         self.assertEqual(kwargs["max_turns"], 75)

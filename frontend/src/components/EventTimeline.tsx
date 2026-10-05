@@ -1,6 +1,7 @@
 import { Collapse, Empty, Tag } from 'antd';
 import type { TaskEvent } from '../api/client';
 import { formatTime } from '../api/client';
+import VisualStep from './VisualStep';
 
 const labels: Record<string, string> = {
   run_started: '开始执行', model_configured: '模型已配置', context_built: '准备上下文',
@@ -8,6 +9,7 @@ const labels: Record<string, string> = {
   model_cancelled: '模型调用中止', tool_started: '收到工具调用', tool_execution_started: '开始执行工具',
   tool_finished: '工具执行结束', tool_cancelled: '工具操作中止', run_failed: '任务执行失败',
   run_finished: 'Agent 运行结束', trace_warning: '文件日志写入异常', worker_failed: '工作进程异常',
+  verification_started: '正在验证目标', verification_finished: '目标验证结束',
 };
 
 export default function EventTimeline({ events }: { events: TaskEvent[] }) {
@@ -15,7 +17,7 @@ export default function EventTimeline({ events }: { events: TaskEvent[] }) {
   if (!visible.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="执行后，这里会显示模型决策和工具调用" />;
   return <div className="event-list">
     {events.length >= 1000 && <p className="muted">当前显示最新 1000 条事件，完整记录保存在本机。</p>}
-    {[...visible].reverse().map(({ id, data }) => {
+    {[...visible].reverse().map(({ id, task_id, data }) => {
       const kind = String(data.event);
       const failed = kind.includes('failed') || data.status === 'failed' || data.status === 'rejected';
       return <div key={id} className={`event-row ${failed ? 'event-error' : ''}`}>
@@ -26,7 +28,10 @@ export default function EventTimeline({ events }: { events: TaskEvent[] }) {
             {typeof data.duration_ms === 'number' && <span>{(data.duration_ms / 1000).toFixed(2)}s</span>}
             {typeof data.status === 'string' && <Tag color={failed ? 'error' : 'default'}>{data.status}</Tag>}
             <time>{formatTime(typeof data.timestamp === 'string' ? data.timestamp : null)}</time>
-          </div></div>, children: <pre className="event-json">{JSON.stringify(data, null, 2)}</pre> }]} />
+          </div></div>, children: <>
+            {data.result && typeof data.result === 'object' && <VisualStep taskId={task_id} result={data.result} />}
+            <pre className="event-json">{JSON.stringify(data, null, 2)}</pre>
+          </> }]} />
       </div>;
     })}
   </div>;

@@ -92,6 +92,52 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "另一个"):
             TaskManager(self.root / "data", self.root / "logs")
 
+    def test_delete_session_cleans_history_events_logs_and_survives_restart(self):
+        manager = self.manager()
+        output_dir = self.root / "outputs"
+        output_dir.mkdir()
+        output = output_dir / "note.txt"
+        output.write_text("保留产物", encoding="utf-8")
+        first = manager.submit("读取说明", AgentOptions(workdir=str(output_dir)))
+        wait_terminal(manager, first["id"])
+        second = manager.submit("追问 [history]", AgentOptions(), first["session_id"])
+        wait_terminal(manager, second["id"])
+        other = manager.store.create_session("另一个会话")
+        deleted = manager.delete_session(first["session_id"])
+        self.assertEqual(deleted, {"id": first["session_id"], "deleted_tasks": 2, "retained_logs": 0})
+        for task_id in (first["id"], second["id"]):
+            with self.assertRaises(KeyError):
+                manager.store.get(task_id)
+            self.assertEqual(manager.store.events(task_id), [])
+            self.assertFalse((self.root / "logs" / f"{task_id}.trace.jsonl").exists())
+        with self.assertRaises(KeyError):
+            manager.store.session_history(first["session_id"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "保留产物")
+        manager.close()
+        self.managers.remove(manager)
+        reopened = self.manager()
+        self.assertEqual([session["id"] for session in reopened.store.list_sessions()], [other["id"]])
+        self.assertEqual(reopened.store.list(), [])
+
+    def test_delete_log_failure_reports_partial_cleanup(self):
+        manager = self.manager()
+        session = manager.store.create_session()
+        manager.store.save(dict(id="fixture", session_id=session["id"], task="test", status="completed"))
+        with patch.object(Path, "unlink", side_effect=PermissionError("日志被占用")):
+            deleted = manager.delete_session(session["id"])
+        self.assertEqual(deleted["retained_logs"], 1)
+        with self.assertRaises(KeyError):
+            manager.store.get_session(session["id"])
+
+    def test_delete_never_removes_log_outside_trace_directory(self):
+        manager = self.manager()
+        session = manager.store.create_session()
+        outside = self.root / "outside.trace.jsonl"
+        outside.write_text("保留", encoding="utf-8")
+        manager.store.save(dict(id="../outside", session_id=session["id"], task="legacy", status="completed"))
+        self.assertEqual(manager.delete_session(session["id"])["retained_logs"], 1)
+        self.assertTrue(outside.exists())
+
     def test_file_trace_failure_does_not_disable_ui_events(self):
         channel = queue.Queue()
         file_sink = Mock()

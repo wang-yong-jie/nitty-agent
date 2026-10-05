@@ -23,3 +23,4 @@ class AgentState:
     run_id: str | None = None
     session_id: str | None = None
     omitted_messages: int = 0
+    verification: dict | None = None

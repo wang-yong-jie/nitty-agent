@@ -1,11 +1,14 @@
 import { Alert, Button, Card, Input, Typography } from 'antd';
 import type { Task } from '../api/client';
-import { statusLabels } from '../api/client';
+import { active, statusLabels } from '../api/client';
+import MarkdownAnswer from './MarkdownAnswer';
+import VerificationNotice from './VerificationNotice';
 
 type Props = {
-  tasks: Task[]; selectedId: string; draft: string; onDraft: (value: string) => void;
+  tasks: Task[]; draft: string; onDraft: (value: string) => void;
   onSelect: (id: string) => void; onSubmit: () => void; submitting: boolean; disabled: boolean;
   omittedMessages: number;
+  onStop: (task: Task) => void; stopping: boolean;
 };
 
 export default function ConversationPanel(props: Props) {
@@ -15,9 +18,15 @@ export default function ConversationPanel(props: Props) {
     {props.tasks.map(task => <div className="conversation-turn" key={task.id}>
       <div className="conversation-question"><strong>你</strong><Typography.Paragraph>{task.task}</Typography.Paragraph></div>
       <div className="conversation-answer"><strong>Agent</strong>
-        {task.id === props.selectedId ? <p className="muted">{statusLabels[task.status]} · 执行详情和回答见下方</p>
-          : <Typography.Paragraph>{task.answer || task.error || statusLabels[task.status]}</Typography.Paragraph>}
-        {task.id !== props.selectedId && <Button size="small" onClick={() => props.onSelect(task.id)}>查看此次执行</Button>}
+        {task.answer ? <MarkdownAnswer content={task.answer} />
+          : <Typography.Paragraph>{task.error || statusLabels[task.status]}</Typography.Paragraph>}
+        <VerificationNotice verification={task.verification} />
+        <div className="conversation-actions">
+          <Button size="small" onClick={() => props.onSelect(task.id)}>查看此次详细执行过程</Button>
+          {active(task) && <Button size="small" danger loading={props.stopping} disabled={task.status === 'stopping'}
+            onClick={() => props.onStop(task)}>{task.status === 'stopping' ? '正在停止…' : '停止任务'}</Button>}
+        </div>
+        {task.status === 'stopping' && <p className="muted">正在等待当前调用结束</p>}
       </div>
     </div>)}
     <Input.TextArea aria-label="继续追问" value={props.draft} onChange={event => props.onDraft(event.target.value)}

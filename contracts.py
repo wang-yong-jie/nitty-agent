@@ -207,6 +207,14 @@ class DesktopController(Protocol):
     def screenshot(self) -> ToolResult:
         ...
 
+    def observation(self, frame_id: str) -> ToolResult:
+        """复核并复用最新观察，不发布新的编号。"""
+        ...
+
+    def crop(self, frame_id: str, x: int, y: int, width: int, height: int) -> ToolResult:
+        """从原图裁剪，返回新编号及受控的局部坐标系。"""
+        ...
+
     def validate_frame(self, frame_id: str) -> None:
         """无输入地检查截图是否仍有效；失效或取消时抛出异常。"""
         ...

@@ -33,6 +33,10 @@ conda run --no-capture-output -n agent python web.py
   任务文本、结果和事件是本地持久化数据；截图编码不通过此 Web API 返回。
 - 左侧按会话组织历史。在“会话记录”输入框中继续追问，Agent 会继承此前的问答和工具反馈。
   “新建会话”开始独立历史；每次追问仍生成独立任务和运行日志，可分别查看执行状态。
+  会话记录按顺序直接展示每次提问和最终回答；点击“查看此次详细执行过程”在侧边面板查看对应的时间线、工具反馈和运行信息。
+  Agent 回答支持 Markdown 标题、加粗、列表、引用、表格、链接和代码块；宽表格及代码块可横向滚动，复制按钮保留 Markdown 原文。
+  每个会话旁的“删除”按钮需确认后才执行，会删除会话上下文、关联任务、事件和对应的运行日志；已经生成的文件保留。
+  正在执行或停止中的会话不能删除，需先停止并等待终态。删除当前会话后返回新任务页面。
   追问沿用会话最近一次的模型与运行设置，以及已创建的工作目录；旧任务可以复制到新会话重新配置。
 - SSE 带事件 ID，断线重连使用 `Last-Event-ID` 续传；界面显示最新 1000 条事件，
   完整事件可通过 API 分页获取。文件日志故障不会关闭界面事件。
@@ -113,6 +117,8 @@ API：`POST /api/sessions` 创建会话，`GET /api/sessions` 列出会话，
 `GET /api/sessions/{id}/tasks` 查看会话内的任务。`POST /api/tasks` 携带 `session_id` 可追问；
 不携带则新建会话。省略 `options` 时沿用该会话最近的设置，首次任务使用默认设置。
 任务记录包含 `session_id`；会话详情只返回元数据，不将完整工具上下文暴露给浏览器。
+`DELETE /api/sessions/{id}` 删除会话及关联记录；活动会话返回 409，未知会话返回 404。
+如果个别日志文件无法清理，删除结果中的 `retained_logs` 会说明保留数量，界面会提示；数据库中的会话已删除。
 
 命令行连续会话：
 
@@ -428,8 +434,8 @@ PyCharm：项目解释器选 Conda `agent`，运行配置的**脚本参数**填�
 > 打开记事本，输入“你好，这是桌面 Agent 测试”，保存到桌面的 nitty-desktop-demo.txt，
 > 再打开文件管理器，确认该文件出现。若同名文件已存在，另取一个新名字。
 
-桌面模式默认使用 `direct`，提供 9 个桌面工具和只读 `app_find`，共 10 个工具，默认最多 50 轮。
-`separate` 模式额外提供 `desktop_ask`，共 11 个工具。
+桌面模式默认使用 `direct`，提供 11 个桌面工具和只读 `app_find`，共 12 个工具，默认最多 50 轮。
+包括局部裁剪 `desktop_crop` 和效果验证 `desktop_verify`；`separate` 模式额外提供 `desktop_ask`，共 13 个工具。
 要同时提供原来的文件和 Shell 工具，可加 `--with-local-tools`：
 
 ```powershell
@@ -440,6 +446,8 @@ conda run --no-capture-output -n agent python main.py --desktop --with-local-too
 | --- | --- |
 | `app_find(name)` | 查询开始菜单应用注册、AppX 包、快捷方式和卸载注册信息；不启动应用 |
 | `desktop_screenshot()` | 获取主屏幕截图、尺寸、前台窗口和 `frame_id` |
+| `desktop_crop(frame_id, x, y, width, height)` | 从原图裁剪局部；返回新编号与局部坐标系，旧编号失效 |
+| `desktop_verify(expected, frame_id=None)` | 独立验证预期结果，返回 achieved/unmet/uncertain 和可见证据 |
 | `desktop_click(frame_id, x, y, button="left", clicks=1)` | 单击、双击或右击 |
 | `desktop_move(frame_id, x, y)` | 鼠标悬停 |
 | `desktop_drag(frame_id, from_x, from_y, to_x, to_y, button="left", duration=0.5)` | 拖拽 |
@@ -448,11 +456,12 @@ conda run --no-capture-output -n agent python main.py --desktop --with-local-too
 | `desktop_hotkey(frame_id, keys)` | 组合键，例如 `["ctrl", "s"]`、`["alt", "tab"]` |
 | `desktop_type_text(frame_id, text)` | Unicode 文本、中文、换行，最多 2000 字符 |
 | `desktop_wait(seconds)` | 等待 0～10 秒并重新截图 |
-| `desktop_ask(question)` | 仅分离模式：重新截图并向 VLM 提出具体问题，返回文字观察、目标坐标和 `frame_id` |
+| `desktop_ask(question, frame_id=None)` | 仅分离模式：默认新截图，也可复用有效编号；向 VLM 提问并返回文字、坐标和耗时 |
 
 执行流程：`截图 → 模型选择一个动作 → 输入 → 等待界面响应 → 新截图 → 模型继续`。
 首次模型请求前先检查截图能否取得；检查失败会直接报错。
-默认动作后等待 0.4 秒；页面仍在加载时，模型可调用 `desktop_wait`。
+动作后先等待至少 0.4 秒，再进行连续帧稳定检测。检测上限默认 3 秒，可用 `--stability-timeout` 调整（0.5～10 秒）；
+超时返回 `stable=false` 并拒绝立即输入，需等待后重新观察。稳定只表示画面适合观察，不代表业务目标成功。
 
 ### 应用查找与操作回退
 
@@ -573,7 +582,7 @@ conda run --no-capture-output -n agent python main.py --desktop --vision-mode di
 
 **分离模式**：主模型只需支持文本和工具调用；独立 VLM 负责回答截图问题。
 LLM 按需调用 `desktop_ask(question)`，例如“找到保存按钮，返回位置”或
-“检查是否保存成功，说明可见证据”。每次提问都会获取一张新截图，VLM 只接收本次问题和图片，
+“检查是否保存成功，说明可见证据”。默认获取新截图；传入最新 `frame_id` 可复用当前全屏或局部观察。VLM 只接收本次问题和图片，
 不共享主模型的完整任务历史；需要前情时，LLM 应在问题中明确说明。
 普通截图、等待和动作不会自动调用 VLM，也不会自动生成泛泛的屏幕描述。
 
@@ -646,19 +655,19 @@ F8 是全局急停键：一旦检测到就锁存，停止后续输入；若模�
 
 ### 图片与环境的接入方式
 
-- `register_desktop_tools(registry, desktop, vision=None)` 显式绑定 `DesktopController`；控制器为必填参数。
+- `register_desktop_tools(registry, desktop, vision=None, workflow=None)` 显式绑定 `DesktopController`；控制器为必填参数。
   工具执行不读取 `environment.desktop`，可配合没有桌面属性的 Environment 使用。
 - 传入 `vision=ModelVisionAdapter(vlm_model)` 启用按需视觉工具；VLM 可复用任意支持图片的现有模型适配器。
 - 自定义视觉后端实现 `VisionAdapter.answer(question, image, width=..., height=...) → VisionAnswer`。
-  自定义桌面控制器须实现 `validate_frame(frame_id)`，用于视觉请求后的无输入复核。
+  自定义桌面控制器须实现 `validate_frame(frame_id)`、`observation(frame_id)` 和 `crop(...)`，支持观察复用、复核和局部裁剪。
 - `LocalEnvironment(desktop=desktop)` 仅将桌面信息纳入环境快照；CLI 将同一控制器传给环境和工具注册函数。
 - 桌面使用规则随工具注册，通用上下文模块不包含桌面工具名称判断；Runtime 不导入 Windows 库。
 - `ToolResult(data, images)` → `Observation.images` → `Message.images`，图片与 JSON 文本分开传递。
 - OpenAI 兼容适配器在整组 tool 结果之后追加带图片的 user 观察消息；Claude 放在对应 `tool_result` 内容块里。
 - `ContextBuilder(max_images=2)` 默认仅保留模型上下文中最近两张图片；分离模式在主模型边界继续移除这些附件。
   原始状态保留本次任务全部观察供调试。
-- 图片保存在进程内存中，不自动保存到磁盘，也不把 Base64 内容打印到控制台。
-  一体模式将截图发送给主模型服务；分离模式仅在提问时将本次截图发送给视觉服务，文字观察返回主模型。
+- 图片默认保存在进程内存中；显式启用 `--record-desktop` 时保存视觉轨迹，不把 Base64 内容打印到控制台。
+  一体模式将截图发送给主模型服务；分离模式在视觉提问及效果验证时将截图发送给视觉服务，文字观察返回主模型。
 
 一体模式的主模型需要支持视觉输入，参见 [DeepSeek 图像理解文档](https://api-docs.deepseek.com/guides/vision/)。
 分离模式中，主模型需要支持工具调用，VLM 需要支持图片输入和按要求输出 JSON，不要求 VLM 支持工具调用。
@@ -670,16 +679,21 @@ Python API 中，桌面控制器的生命周期和急停检查由调用方接入
 
 ```python
 from adapters.windows_desktop import WindowsDesktop
+from adapters.desktop_workflow import DesktopWorkflow
+from adapters.vision import ModelVisionAdapter
 from tools.desktop import register_desktop_tools
 from core.tooling import ToolRegistry
 
 # model 使用前文已经配置好的支持图片输入的适配器。
 with WindowsDesktop() as desktop:
     registry = ToolRegistry()
-    register_desktop_tools(registry, desktop)
+    workflow = DesktopWorkflow(desktop, ModelVisionAdapter(model))
+    register_desktop_tools(registry, desktop, workflow=workflow)
     agent = Agent(
         model, registry, LocalEnvironment(desktop=desktop), max_turns=50,
         cancel_check=desktop.check_cancelled,
+        completion_check=workflow.finish, on_run_start=workflow.start,
+        on_observation=workflow.observe,
     )
     print(agent.run("打开记事本并输入一段中文。"))
 ```
@@ -693,10 +707,14 @@ from adapters.vision import ModelVisionAdapter
 # planner_model 与 vlm_model 是调用方分别创建并管理的模型适配器。
 with WindowsDesktop() as desktop:
     registry = ToolRegistry()
-    register_desktop_tools(registry, desktop, vision=ModelVisionAdapter(vlm_model))
+    vision = ModelVisionAdapter(vlm_model)
+    workflow = DesktopWorkflow(desktop, vision)
+    register_desktop_tools(registry, desktop, vision=vision, workflow=workflow)
     agent = Agent(
         TextOnlyModel(planner_model), registry, LocalEnvironment(desktop=desktop),
         max_turns=50, cancel_check=desktop.check_cancelled,
+        completion_check=workflow.finish, on_run_start=workflow.start,
+        on_observation=workflow.observe,
     )
     print(agent.run("找到保存按钮，保存后检查界面是否显示成功。"))
 ```
@@ -704,6 +722,33 @@ with WindowsDesktop() as desktop:
 Python 调用方须搭配 `TextOnlyModel`，确保纯文本主模型不接收图片附件；CLI 会自动完成该装配。
 
 ## 本地验证
+
+桌面动作支持可选 `expected` 参数，例如点击保存时提供“未保存标记消失”；使用独立验证器检查动作前后画面。
+CLI/Web 装配的桌面 Agent 在有输入动作后、准备结束时，还会检查整个用户目标。未达到或无法确认时反馈证据继续处理，
+第二次仍无法验证成功则停止并保留验证结果。任务 `status` 与 `verification` 分开，前端显示独立的“目标已验证/尚未达到/不确定”。
+自定义 Python 装配可通过 `DesktopWorkflow`、`Agent(completion_check=workflow.finish, on_run_start=workflow.start, on_observation=workflow.observe)` 接入同一机制。
+
+连续无明显画面变化的动作会返回恢复建议；相同输入连续三次无进展后拒绝继续重复，默认无进展预算为六次，
+可用 `--desktop-recovery-limit` 调整（3～20）。预算耗尽后再尝试输入会直接停止当前任务，保留日志和已有影响，避免持续空转。
+变化检测只用于发现无进展，不等于成功判定；成功验证会重置恢复状态。
+耗时视觉请求完成后会复核画面内容；裁剪继承原始捕获时间，不延长观察时效。
+
+启用 `--record-desktop` 或前端“记录操作前后截图”后，运行目录保存 before/after/target PNG 与 `trajectory.jsonl`，
+包含实际/归一化坐标、输入和等待截图耗时、差异与恢复信息，元数据不保存输入文本。
+截图本身可能包含输入内容，按本机调试数据管理。Web 轨迹放在 `.agent-logs/<task_id>.frames/`，执行详情支持查看点击标记；
+删除会话时清理对应轨迹。默认不录制。截图接口只允许读取已有任务的轨迹 PNG。
+
+真实 Windows 桌面评测会打开独立 Tk 测试窗口，覆盖中文输入、文件保存、弹窗、滚动、小目标和加载恢复。
+验收器独立检查窗口回调状态和产物，不向 Agent 提供内部状态；模型配置沿用 `.env`。请在空闲桌面运行：
+
+```powershell
+conda run --no-capture-output -n agent python -m evaluation.desktop_benchmark --output .agent-logs/eval-run-01.json
+```
+
+用 `--cases small_target save` 选择场景，`--geometry 1100x720+160+80` 改变窗口布局，或在 Windows 显示设置中改变 DPI 后重复运行。
+`--baseline .agent-logs/eval-run-01.json` 引入旧结果对照；结果路径必须是新文件，截图、日志和产物保存在同名 `.artifacts` 目录。
+报告记录独立任务成功率、完成声明精度、动作数、无进展后的恢复及耗时。不同场景、模型和 DPI 的结果不能直接视为同一基线。
+这组受控任务用于工程回归，不代表 OSWorld 等开放任务基准成绩。
 
 ```powershell
 conda run --no-capture-output -n agent python -m unittest discover -s tests -t . -v
@@ -722,5 +767,5 @@ OpenAI/Claude 适配器使用模拟服务响应。
 单独运行一组测试，例如 `conda run --no-capture-output -n agent python -m unittest tests.test_vision -v`。
 在 PyCharm 中也可为 `tests` 目录创建 unittest 运行配置，工作目录设为项目根目录。
 
-当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮；未实现交互式 Shell、自动加载 `AGENTS.md`、
-历史压缩或持久化恢复。文件和命令在本机以当前用户权限执行。
+当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮；未实现交互式 Shell、自动加载 `AGENTS.md` 或长期记忆。
+会话已有裁剪和持久化恢复；文件和命令在本机以当前用户权限执行。

@@ -14,7 +14,7 @@ from api.app import create_app
 from api.schemas import RunOptions
 from bootstrap import AgentOptions
 from tests.run_web_fixture import create_fixture_app
-from tests.service_workers import wait_terminal
+from tests.service_workers import blocking_worker, wait_terminal
 
 
 class ApiTests(unittest.TestCase):
@@ -74,6 +74,54 @@ class ApiTests(unittest.TestCase):
         result = wait_terminal(self.app.state.manager, task["id"])
         self.assertEqual(result["status"], "cancelled")
 
+    def test_delete_session_blocks_active_tasks_and_removes_completed_history(self):
+        self.app.state.manager.worker_target = blocking_worker
+        task = self.submit("等待 [slow]")
+        path = f"/api/sessions/{task['session_id']}"
+        self.assertEqual(self.client.delete(path).status_code, 409)
+        self.assertEqual(self.client.get(path).status_code, 200)
+        self.client.post(f"/api/tasks/{task['id']}/stop", json={})
+        self.assertEqual(self.client.delete(path).status_code, 409)
+        wait_terminal(self.app.state.manager, task["id"])
+        response = self.client.delete(path)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["deleted_tasks"], 1)
+        self.assertEqual(self.client.get(path).status_code, 404)
+        self.assertEqual(self.client.get(f"/api/tasks/{task['id']}").status_code, 404)
+        self.assertEqual(self.client.get("/api/sessions").json(), [])
+        self.assertEqual(self.client.get("/api/tasks").json(), [])
+        self.assertEqual(self.client.delete(path).status_code, 404)
+
+    def test_delete_empty_session_and_origin_validation(self):
+        session = self.client.post("/api/sessions", json={}).json()
+        path = f"/api/sessions/{session['id']}"
+        self.assertEqual(self.client.delete(path, headers={"Origin": "https://evil.example"}).status_code, 403)
+        self.assertEqual(self.client.get(path).status_code, 200)
+        preflight = self.client.options(path, headers={"Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "DELETE"})
+        self.assertEqual(preflight.status_code, 200)
+        self.assertIn("DELETE", preflight.headers["access-control-allow-methods"])
+        self.assertEqual(self.client.delete(path).json()["deleted_tasks"], 0)
+
+    def test_desktop_artifacts_are_scoped_to_task_and_deleted_with_session(self):
+        task = self.submit()
+        wait_terminal(self.app.state.manager, task["id"])
+        from PIL import Image
+        directory = self.app.state.manager.trace_dir / f"{task['id']}.frames"
+        directory.mkdir()
+        filename = "step-0001-target.png"
+        Image.new("RGB", (10, 10), "red").save(directory / filename)
+        (directory / "trajectory.jsonl").write_text("{}\n", encoding="utf-8")
+        path = f"/api/tasks/{task['id']}/artifacts/{filename}"
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/png")
+        self.assertEqual(self.client.get(f"/api/tasks/{task['id']}/artifacts/trajectory.jsonl").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/tasks/missing/artifacts/{filename}").status_code, 404)
+        self.assertEqual(self.client.delete(f"/api/sessions/{task['session_id']}").status_code, 200)
+        self.assertFalse(directory.exists())
+        self.assertEqual(self.client.get(path).status_code, 404)
+
     def test_event_replay_respects_last_event_id_and_closes_at_terminal(self):
         task = self.submit()
         wait_terminal(self.app.state.manager, task["id"])
@@ -91,6 +139,9 @@ class ApiTests(unittest.TestCase):
         for body in ({"task": " "}, {"task": "test", "api_key": "hidden"},
                      {"task": "test", "options": {"api_key": "hidden"}},
                      {"task": "test", "options": {"max_turns": True}},
+                     {"task": "test", "options": {"stability_timeout": 0}},
+                     {"task": "test", "options": {"desktop_recovery_limit": 2}},
+                     {"task": "test", "options": {"record_desktop": True}},
                      {"task": "test", "options": {"vision_mode": "separate"}}):
             with self.subTest(body=body):
                 self.assertEqual(self.client.post("/api/tasks", json=body).status_code, 422)

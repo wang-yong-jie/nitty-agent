@@ -22,9 +22,12 @@ class Agent:
         run_config: dict | None = None,
         session: Session | None = None,
         on_session_update: Callable[[Session], None] | None = None,
+        completion_check=None, on_run_start=None, on_observation=None,
     ):
         self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check, trace,
-                                    trace_strict=trace_strict, run_config=run_config)
+                                    trace_strict=trace_strict, run_config=run_config,
+                                    completion_check=completion_check, on_run_start=on_run_start,
+                                    on_observation=on_observation)
         self.runtime.session = session if session is not None else Session()
         self.runtime.on_session_update = on_session_update
 

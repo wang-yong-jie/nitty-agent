@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
-from api.schemas import ApiError, Capabilities, SessionCreate, SessionRecord, TaskCreate, TaskEvent, TaskRecord
+from api.schemas import ApiError, Capabilities, SessionCreate, SessionDeleteResult, SessionRecord, TaskCreate, TaskEvent, TaskRecord
 from bootstrap import AgentOptions, PROVIDER_KEYS, ROOT, load_settings, model_settings
 from service.manager import TaskBusy, TaskManager
 from service.store import ACTIVE
@@ -42,7 +43,7 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
     app = FastAPI(title="Nitty Agent 本地控制台", version="1.0.0", lifespan=lifespan,
                   responses={status: {"model": ApiError} for status in (400, 403, 404, 409, 422, 500)})
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-                       allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Last-Event-ID"])
+                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "Last-Event-ID"])
 
     @app.middleware("http")
     async def local_access(request: Request, call_next):
@@ -89,6 +90,15 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
     def session_detail(session_id: str):
         return get_session(session_id)
 
+    @app.delete("/api/sessions/{session_id}", response_model=SessionDeleteResult, operation_id="delete_session")
+    def delete_session(session_id: str):
+        try:
+            return manager().delete_session(session_id)
+        except KeyError:
+            raise HTTPException(404, "会话不存在。") from None
+        except TaskBusy as error:
+            raise HTTPException(409, str(error)) from None
+
     @app.get("/api/sessions/{session_id}/tasks", response_model=list[TaskRecord], operation_id="list_session_tasks")
     def session_tasks(session_id: str):
         get_session(session_id)
@@ -112,6 +122,8 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
             if options.desktop and os.name != "nt":
                 raise ValueError("桌面模式仅支持 Windows。")
             return manager().submit(body.task, options, body.session_id)
+        except KeyError:
+            raise HTTPException(404, "会话不存在。") from None
         except TaskBusy as error:
             raise HTTPException(409, str(error)) from None
         except (ValueError, RuntimeError) as error:
@@ -120,6 +132,19 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
     @app.get("/api/tasks/{task_id}", response_model=TaskRecord, operation_id="get_task")
     def task_detail(task_id: str):
         return get_task(task_id)
+
+    @app.get("/api/tasks/{task_id}/artifacts/{filename}", response_class=FileResponse, operation_id="get_desktop_artifact")
+    def desktop_artifact(task_id: str, filename: str):
+        get_task(task_id)
+        if not re.fullmatch(r"step-\d{4,}-(before|after|target)\.png", filename):
+            raise HTTPException(404, "截图不存在。")
+        root = manager().trace_dir.resolve()
+        directory = root / f"{task_id}.frames"
+        path = directory / filename
+        if (directory.is_symlink() or directory.resolve().parent != root
+                or path.resolve().parent != directory.resolve() or not path.is_file()):
+            raise HTTPException(404, "截图不存在。")
+        return FileResponse(path, media_type="image/png")
 
     @app.post("/api/tasks/{task_id}/stop", response_model=TaskRecord, operation_id="stop_task")
     def stop_task(task_id: str):
@@ -151,7 +176,11 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
                 cursor = event["id"]
                 yield ServerSentEvent(data=event, event="task_event", id=str(cursor))
             if not batch:
-                record = await asyncio.to_thread(manager().store.get, task_id)
+                try:
+                    record = await asyncio.to_thread(manager().store.get, task_id)
+                except KeyError:
+                    yield ServerSentEvent(data={"status": "deleted"}, event="stream_end")
+                    return
                 if record["status"] not in ACTIVE:
                     pending = await asyncio.to_thread(manager().store.events, task_id, cursor)
                     if pending:

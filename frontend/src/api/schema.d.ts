@@ -33,7 +33,8 @@ export interface paths {
         get: operations["get_session"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Delete Session */
+        delete: operations["delete_session"];
         options?: never;
         head?: never;
         patch?: never;
@@ -100,6 +101,23 @@ export interface paths {
         };
         /** Task Detail */
         get: operations["get_task"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{task_id}/artifacts/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Desktop Artifact */
+        get: operations["get_desktop_artifact"];
         put?: never;
         post?: never;
         delete?: never;
@@ -253,6 +271,21 @@ export interface components {
              * @default 1600
              */
             screenshot_size: number;
+            /**
+             * Stability Timeout
+             * @default 3
+             */
+            stability_timeout: number;
+            /**
+             * Desktop Recovery Limit
+             * @default 6
+             */
+            desktop_recovery_limit: number;
+            /**
+             * Record Desktop
+             * @default false
+             */
+            record_desktop: boolean;
         };
         /** SessionCreate */
         SessionCreate: {
@@ -261,6 +294,15 @@ export interface components {
              * @default 新会话
              */
             title: string;
+        };
+        /** SessionDeleteResult */
+        SessionDeleteResult: {
+            /** Id */
+            id: string;
+            /** Deleted Tasks */
+            deleted_tasks: number;
+            /** Retained Logs */
+            retained_logs: number;
         };
         /** SessionRecord */
         SessionRecord: {
@@ -328,6 +370,28 @@ export interface components {
             turn: number;
             /** Stop Reason */
             stop_reason: string | null;
+            verification?: components["schemas"]["VerificationRecord"] | null;
+        };
+        /** VerificationRecord */
+        VerificationRecord: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "achieved" | "unmet" | "uncertain";
+            /** Expected */
+            expected: string;
+            /** Evidence */
+            evidence: string;
+            /** Frame Id */
+            frame_id: string;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "step" | "task";
+            /** Duration Ms */
+            duration_ms: number;
         };
     };
     responses: never;
@@ -510,6 +574,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionRecord"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    delete_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionDeleteResult"];
                 };
             };
             /** @description Bad Request */
@@ -891,6 +1031,81 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["TaskRecord"];
                 };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_desktop_artifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Bad Request */
             400: {

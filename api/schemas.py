@@ -20,6 +20,9 @@ class RunOptions(BaseModel):
     vision_base_url: str | None = Field(default=None, max_length=2048)
     max_turns: int | None = Field(default=None, ge=1, le=1000, strict=True)
     screenshot_size: int = Field(default=1600, ge=640, le=3840, strict=True)
+    stability_timeout: float = Field(default=3, ge=0.5, le=10)
+    desktop_recovery_limit: int = Field(default=6, ge=3, le=20, strict=True)
+    record_desktop: bool = False
 
     def to_options(self) -> AgentOptions:
         return AgentOptions(**self.model_dump())
@@ -52,6 +55,15 @@ class ErrorDetail(BaseModel):
     exception_type: str | None = None
 
 
+class VerificationRecord(BaseModel):
+    status: Literal["achieved", "unmet", "uncertain"]
+    expected: str
+    evidence: str
+    frame_id: str
+    scope: Literal["step", "task"]
+    duration_ms: float
+
+
 class TaskRecord(BaseModel):
     id: str
     session_id: str | None = None
@@ -67,6 +79,7 @@ class TaskRecord(BaseModel):
     run_id: str | None
     turn: int
     stop_reason: str | None
+    verification: VerificationRecord | None = None
 
 
 class SessionCreate(BaseModel):
@@ -82,6 +95,12 @@ class SessionRecord(BaseModel):
     options: RunOptions | None
     working_directory: str | None
     omitted_messages: int
+
+
+class SessionDeleteResult(BaseModel):
+    id: str
+    deleted_tasks: int
+    retained_logs: int
 
 
 class TaskEvent(BaseModel):

@@ -9,8 +9,10 @@ import time
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 from contracts import AgentCancelled, ImageContent, ToolExecutionError, ToolRejected, ToolResult
+from adapters.desktop_support import DesktopRecorder, RecoveryTracker, difference
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,9 @@ class Frame:
     image_size: tuple[int, int]
     window: int
     captured_at: float
+    screen_geometry: tuple[int, int, int, int] | None = None
+    source_id: str | None = None
+    stable: bool = True
 
     def point(self, x: int, y: int) -> tuple[int, int]:
         width, height = self.image_size
@@ -41,13 +46,22 @@ def bounded_number(value, name, minimum, maximum):
 class WindowsDesktop:
     """独立于 Runtime 的桌面控制器；backend 可注入以进行不触碰桌面的测试。"""
 
-    def __init__(self, *, max_image_size: int = 1600, settle_seconds: float = 0.4, backend=None):
+    def __init__(self, *, max_image_size: int = 1600, settle_seconds: float = 0.4,
+                 stability_timeout: float = 3, stability_interval: float = 0.15,
+                 recovery_limit: int = 6, artifact_dir: Path | None = None, backend=None):
         if type(max_image_size) is not int or not 640 <= max_image_size <= 3840:
             raise ValueError("max_image_size 必须是 640 到 3840 之间的整数。")
         self.settle_seconds = bounded_number(settle_seconds, "settle_seconds", 0, 5)
         self.max_image_size = max_image_size
+        self.stability_timeout = bounded_number(stability_timeout, "stability_timeout", 0, 10)
+        self.stability_interval = bounded_number(stability_interval, "stability_interval", 0.01, 1)
+        self.recovery = RecoveryTracker(recovery_limit)
+        self.recorder = DesktopRecorder(artifact_dir) if artifact_dir is not None else None
         self.backend = backend if backend is not None else _WindowsBackend()
         self.frame: Frame | None = None
+        self._native = self._view = self._result = None
+        self.last_before = self.last_action = None
+        self.action_count = 0
 
     def __enter__(self):
         return self
@@ -57,6 +71,7 @@ class WindowsDesktop:
 
     def close(self):
         self.frame = None
+        self._native = self._view = self._result = self.last_before = None
         self.backend.close()
 
     def check_cancelled(self):
@@ -73,6 +88,10 @@ class WindowsDesktop:
     def screenshot(self) -> ToolResult:
         self.check_cancelled()
         self.frame = None
+        return self._capture_stable(0)
+
+    def _capture_once(self):
+        self.check_cancelled()
         geometry = self.backend.geometry()
         window = self.backend.foreground()
         picture = self.backend.capture(geometry)
@@ -80,6 +99,33 @@ class WindowsDesktop:
             raise RuntimeError("截图时显示设置或前台窗口发生变化，请重新截图。")
         if picture.size != geometry[2:]:
             raise RuntimeError("截图尺寸与物理屏幕尺寸不一致，请检查 DPI 设置。")
+        return picture, geometry, window, time.monotonic()
+
+    def _capture_stable(self, minimum):
+        started = time.perf_counter()
+        self._wait(minimum)
+        picture, geometry, window, captured_at = self._capture_once()
+        stable_count = 0
+        deadline = time.monotonic() + self.stability_timeout
+        diff = {"mean": 0, "changed_fraction": 0}
+        while self.stability_timeout and time.monotonic() < deadline:
+            self._wait(min(self.stability_interval, max(0, deadline - time.monotonic())))
+            newer, new_geometry, new_window, captured_at = self._capture_once()
+            diff = difference(picture, newer)
+            quiet = (geometry == new_geometry and window["handle"] == new_window["handle"]
+                     and diff["mean"] <= 1.2 and diff["changed_fraction"] <= 0.005)
+            stable_count = stable_count + 1 if quiet else 0
+            picture, geometry, window = newer, new_geometry, new_window
+            if stable_count >= 2:
+                break
+        stable = not self.stability_timeout or stable_count >= 2
+        self._native = picture
+        frame_id = uuid.uuid4().hex
+        return self._publish(picture, geometry, geometry, window, captured_at, frame_id, stable,
+                             stability={"stable": stable, "samples": stable_count,
+                                        "duration_ms": round((time.perf_counter() - started) * 1000, 2), "difference": diff})
+
+    def _publish(self, picture, geometry, screen_geometry, window, captured_at, source_id, stable, **extra):
         ratio = min(1, self.max_image_size / max(picture.size))
         if ratio < 1:
             from PIL import Image
@@ -87,26 +133,63 @@ class WindowsDesktop:
             picture = picture.resize(tuple(max(1, round(n * ratio)) for n in picture.size), Image.Resampling.LANCZOS)
         output = BytesIO()
         picture.save(output, format="PNG")
-        frame = Frame(uuid.uuid4().hex, geometry, picture.size, window["handle"], time.monotonic())
+        frame = Frame(uuid.uuid4().hex, geometry, picture.size, window["handle"], captured_at,
+                      screen_geometry, source_id, stable)
         self.frame = frame
-        return ToolResult({
+        self._view = picture
+        self._result = ToolResult({
             "frame_id": frame.id, "image_width": picture.width, "image_height": picture.height,
             "screen_left": geometry[0], "screen_top": geometry[1],
             "screen_width": geometry[2], "screen_height": geometry[3],
             "scale_x": geometry[2] / picture.width, "scale_y": geometry[3] / picture.height,
             "foreground_window": window,
+            "source_frame_id": source_id, "stable": stable, **extra,
         }, [ImageContent(base64.b64encode(output.getvalue()).decode("ascii"))])
+        return self._result
+
+    def observation(self, frame_id):
+        self.validate_frame(frame_id)
+        return ToolResult(dict(self._result.data), list(self._result.images))
+
+    def crop(self, frame_id, x, y, width, height):
+        frame = self._current(frame_id)
+        frame.point(x, y)
+        if (type(width) is not int or type(height) is not int or width < 1 or height < 1
+                or x + width > frame.image_size[0] or y + height > frame.image_size[1]):
+            raise ToolRejected("INVALID_ARGUMENTS", "裁剪区域必须完整位于当前截图内。")
+        left, top, native_width, native_height = frame.geometry
+        x1 = left + round(x * native_width / frame.image_size[0])
+        y1 = top + round(y * native_height / frame.image_size[1])
+        x2 = left + round((x + width) * native_width / frame.image_size[0])
+        y2 = top + round((y + height) * native_height / frame.image_size[1])
+        screen = frame.screen_geometry or frame.geometry
+        image = self._native.crop((x1 - screen[0], y1 - screen[1], x2 - screen[0], y2 - screen[1]))
+        return self._publish(image, (x1, y1, x2 - x1, y2 - y1), screen, self.backend.foreground(),
+                             frame.captured_at, frame.source_id, frame.stable, parent_frame_id=frame.id,
+                             crop_region=[x, y, width, height])
 
     def validate_frame(self, frame_id: str) -> None:
         """供耗时视觉请求完成后复核；不产生新截图，也不消费编号。"""
-        self._current(frame_id)
+        frame = self._current(frame_id)
+        picture, geometry, window, _ = self._capture_once()
+        if geometry != (frame.screen_geometry or frame.geometry) or window["handle"] != frame.window:
+            self.frame = None
+            raise ToolRejected("STALE_FRAME", "观察期间前台窗口或屏幕变化，请重新截图。")
+        left, top, width, height = frame.geometry
+        current = picture.crop((left - geometry[0], top - geometry[1], left - geometry[0] + width, top - geometry[1] + height))
+        from PIL import Image
+        current = current.resize(self._view.size, Image.Resampling.LANCZOS)
+        diff = difference(self._view, current)
+        if diff["mean"] > 1.2 or diff["changed_fraction"] > 0.005:
+            self.frame = None
+            raise ToolRejected("STALE_FRAME", "观察期间界面内容已变化，请重新截图并定位。")
 
     def _current(self, frame_id: str) -> Frame:
         self.check_cancelled()
         frame = self.frame
         if frame is None or frame.id != frame_id:
             raise ToolRejected("STALE_FRAME", "frame_id 已过期或尚未截图，请先调用 desktop_screenshot。")
-        if (time.monotonic() - frame.captured_at > 120 or self.backend.geometry() != frame.geometry
+        if (time.monotonic() - frame.captured_at > 120 or self.backend.geometry() != (frame.screen_geometry or frame.geometry)
                 or self.backend.foreground()["handle"] != frame.window):
             self.frame = None
             raise ToolRejected("STALE_FRAME", "截图已过时，或显示设置/前台窗口已变化，请重新截图。")
@@ -123,17 +206,28 @@ class WindowsDesktop:
 
     def _act(self, frame_id, action, **arguments):
         # 参数校验完成后，再次检查焦点和截图，输入前消费掉 frame_id。
-        self._current(frame_id)
+        frame = self._current(frame_id)
+        if not frame.stable:
+            raise ToolRejected("UI_UNSTABLE", "画面尚未稳定，请等待后重新观察，不能立即输入。")
+        if time.monotonic() - frame.captured_at > 2:
+            self.validate_frame(frame_id)
+        self.recovery.check(action, arguments)
+        before = self._native
+        started = time.perf_counter()
         self.frame = None
+        # 输入失败也可能部分生效，结束检查必须覆盖这次尝试。
+        self.action_count += 1
+        self.last_before = before
+        self.last_action = {"type": action, **{key: value for key, value in arguments.items() if key != "text"}}
         try:
             self.backend.send(action, arguments)
         except AgentCancelled:
             raise
         except Exception as error:
             raise ToolExecutionError("ACTION_FAILED", f"动作可能已部分执行，请先重新截图，不要直接重试：{error}") from error
-        self._wait(self.settle_seconds)
+        input_ms = round((time.perf_counter() - started) * 1000, 2)
         try:
-            result = self.screenshot()
+            result = self._capture_stable(self.settle_seconds)
         except AgentCancelled:
             raise
         except Exception as error:
@@ -141,6 +235,16 @@ class WindowsDesktop:
                                      phase="result") from error
         result.data["action"] = action
         result.data["input_sent"] = True
+        diff = difference(before, self._native)
+        recovery = self.recovery.record(action, arguments, diff)
+        result.data.update(difference=diff, recovery=recovery,
+                           timing_ms={"input": input_ms, "settle_capture": result.data["stability"]["duration_ms"]})
+        if self.recorder is not None:
+            try:
+                result.data["trajectory"] = self.recorder.record(before, self._native, action, arguments,
+                    frame.screen_geometry or frame.geometry, result.data["timing_ms"], diff, recovery)
+            except OSError as error:
+                result.data["recording_error"] = f"轨迹保存失败：{type(error).__name__}"
         return result
 
     @staticmethod
@@ -329,7 +433,7 @@ class _WindowsBackend:
             elif action == "scroll":
                 self.gui.moveTo(arguments["x"], arguments["y"])
                 self.check_cancelled()
-                self.gui.scroll(arguments["amount"])
+                self._wheel(arguments["amount"])
             elif action == "drag":
                 self.gui.moveTo(*arguments["start"])
                 try:
@@ -372,9 +476,17 @@ class _WindowsBackend:
         class Input(ctypes.Structure):
             _fields_ = [("type", wintypes.DWORD), ("value", InputUnion)]
 
-        self.Input, self.KeyboardInput = Input, KeyboardInput
+        self.Input, self.KeyboardInput, self.MouseInput = Input, KeyboardInput, MouseInput
         self.user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int]
         self.user32.SendInput.restype = wintypes.UINT
+
+    def _wheel(self, amount):
+        # Windows 一格滚轮是 WHEEL_DELTA=120；不能直接发送工具中的格数。
+        inputs = (self.Input * 1)()
+        inputs[0].type = 0  # INPUT_MOUSE
+        inputs[0].value.mi = self.MouseInput(0, 0, amount * 120 & 0xFFFFFFFF, 0x0800, 0, 0)
+        if self.user32.SendInput(1, inputs, ctypes.sizeof(self.Input)) != 1:
+            raise RuntimeError("Windows 未接受滚轮输入；目标窗口可能具有更高权限。")
 
     def _unicode(self, character):
         # KEYEVENTF_UNICODE 接收 UTF-16 code unit；非 BMP 字符按代理对发送。

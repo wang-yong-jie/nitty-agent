@@ -59,7 +59,10 @@ def run_task(task_id: str, task: str, options: AgentOptions, cancel, channel, tr
             except Exception as error:
                 sink.warning(error)
             check_cancelled()
-            session = stack.enter_context(agent_session(options, trace=sink, cancel_check=check_cancelled, verbose=False))
+            session_arguments = dict(trace=sink, cancel_check=check_cancelled, verbose=False)
+            if options.record_desktop:
+                session_arguments["artifact_dir"] = Path(trace_path).parent / f"{task_id}.frames"
+            session = stack.enter_context(agent_session(options, **session_arguments))
             session.agent.runtime.session = Session.from_dict(session_data) if session_data else Session()
 
             def save_conversation(conversation):
@@ -103,6 +106,7 @@ def run_task(task_id: str, task: str, options: AgentOptions, cancel, channel, tr
         if session is not None and session.agent.last_state is not None:
             state = session.agent.last_state
             result.update(turn=state.turn, run_id=state.run_id)
+            result["verification"] = state.verification
             if phase != "cleanup" or result["status"] == "completed":
                 result["stop_reason"] = state.stop_reason or result["stop_reason"]
             if state.error_info:

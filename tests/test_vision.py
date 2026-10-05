@@ -284,7 +284,7 @@ class VisionCliTests(unittest.TestCase):
         args = result.agent.call_args.args
         self.assertIsInstance(args[0], TextOnlyModel)
         self.assertEqual(args[0].delegate.model, "deepseek-flash")
-        self.assertEqual(len(args[1].specs()), 14)
+        self.assertEqual(len(args[1].specs()), 16)
         self.assertIn("app_find", {s.name for s in args[1].specs()})
         self.assertIn("desktop_ask", {s.name for s in args[1].specs()})
         vision_model = result.vision.call_args.args[0]
@@ -320,8 +320,9 @@ class VisionCliTests(unittest.TestCase):
     def test_direct_default_ignores_optional_vision_env(self):
         result = self.run_cli(["--desktop"], {"VISION_MODEL": "unused-vlm", "VISION_PROVIDER": "invalid"})
         self.assertNotIsInstance(result.agent.call_args.args[0], TextOnlyModel)
-        self.assertEqual(len(result.agent.call_args.args[1].specs()), 10)
-        result.vision.assert_not_called()
+        self.assertEqual(len(result.agent.call_args.args[1].specs()), 12)
+        # direct 复用主模型验证效果，不装配环境中指定的分离 VLM。
+        result.vision.assert_called_once_with(result.agent.call_args.args[0])
         self.assertEqual(result.clients.call_count, 1)
 
     def test_invalid_mode_configuration_is_rejected_before_model_or_desktop_creation(self):

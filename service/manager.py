@@ -178,6 +178,39 @@ class TaskManager:
                     self._save_status(record)
             return record
 
+    def delete_session(self, session_id: str) -> dict:
+        with self.lock:
+            if self.closed:
+                raise TaskBusy("服务正在关闭。")
+            tasks = self.store.session_tasks(session_id)
+            if any(task["status"] in ACTIVE or task["id"] == self.active_id for task in tasks):
+                raise TaskBusy("此会话仍有任务正在执行，请先停止并等待任务结束。")
+            task_ids = self.store.delete_session(session_id)
+            retained_logs = 0
+            trace_root = self.trace_dir.resolve()
+            for task_id in task_ids:
+                try:
+                    trace_path = trace_root / f"{task_id}.trace.jsonl"
+                    # 仅清理自己的日志及截图文件，不涉及任务工作目录或业务产物。
+                    if trace_path.resolve().parent != trace_root:
+                        raise ValueError("日志路径超出日志目录。")
+                    trace_path.unlink(missing_ok=True)
+                    artifact_dir = trace_root / f"{task_id}.frames"
+                    if artifact_dir.exists():
+                        if artifact_dir.resolve().parent != trace_root or artifact_dir.is_symlink():
+                            raise ValueError("截图目录超出日志目录。")
+                        for artifact in artifact_dir.iterdir():
+                            if (artifact.resolve().parent != artifact_dir.resolve() or not artifact.is_file()
+                                    or not (artifact.name == "trajectory.jsonl" or
+                                            artifact.name.startswith("step-") and artifact.suffix == ".png")):
+                                raise ValueError("截图目录包含非轨迹文件，已保留。")
+                            artifact.unlink()
+                        artifact_dir.rmdir()
+                except (OSError, ValueError) as error:
+                    retained_logs += 1
+                    _report_trace_error(LogRedactor().clean(f"删除会话后的日志清理失败：{error}"))
+            return {"id": session_id, "deleted_tasks": len(task_ids), "retained_logs": retained_logs}
+
     def close(self) -> None:
         with self.lock:
             self.closed = True

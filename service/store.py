@@ -97,6 +97,18 @@ class TaskStore:
                                    (session_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def delete_session(self, session_id: str) -> list[str]:
+        """原子删除会话、关联任务和事件；返回任务 ID 供服务清理日志。"""
+        with self.lock, self.db:
+            tasks = self.session_tasks(session_id)
+            if any(task["status"] in ACTIVE for task in tasks):
+                raise ValueError("此会话仍有任务正在执行，请先停止并等待任务结束。")
+            self.db.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM tasks WHERE json_extract(record, '$.session_id') = ?)",
+                            (session_id,))
+            self.db.execute("DELETE FROM tasks WHERE json_extract(record, '$.session_id') = ?", (session_id,))
+            self.db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        return [task["id"] for task in tasks]
+
     def save(self, record: dict) -> None:
         with self.lock, self.db:
             self.db.execute("INSERT OR REPLACE INTO tasks VALUES (?, ?)",

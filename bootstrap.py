@@ -12,6 +12,7 @@ from openai import OpenAI
 from adapters.local import LocalEnvironment
 from adapters.models import ClaudeModel, OpenAICompatibleModel, TextOnlyModel
 from adapters.vision import ModelVisionAdapter
+from adapters.desktop_workflow import DesktopWorkflow
 from adapters.windows_apps import WindowsApplicationCatalog
 from contracts import EventSink, ModelAdapter
 from core.agent import Agent
@@ -38,6 +39,9 @@ class AgentOptions:
     vision_base_url: str | None = None
     max_turns: int | None = None
     screenshot_size: int = 1600
+    stability_timeout: float = 3
+    desktop_recovery_limit: int = 6
+    record_desktop: bool = False
 
     def validate(self) -> None:
         if self.provider not in PROVIDER_KEYS:
@@ -54,6 +58,12 @@ class AgentOptions:
             raise ValueError("--max-turns 必须为正整数。")
         if type(self.screenshot_size) is not int or not 640 <= self.screenshot_size <= 3840:
             raise ValueError("--screenshot-size 必须在 640 到 3840 之间。")
+        if type(self.stability_timeout) not in {int, float} or not 0.5 <= self.stability_timeout <= 10:
+            raise ValueError("--stability-timeout 必须在 0.5 到 10 秒之间。")
+        if type(self.desktop_recovery_limit) is not int or not 3 <= self.desktop_recovery_limit <= 20:
+            raise ValueError("--desktop-recovery-limit 必须在 3 到 20 之间。")
+        if self.record_desktop and not self.desktop:
+            raise ValueError("--record-desktop 需与 --desktop 一起使用。")
         if self.model is not None and not self.model.strip():
             raise ValueError("模型名称不能为空。")
         if not self.model and self.provider != "deepseek":
@@ -117,21 +127,29 @@ class AgentSession:
 @contextmanager
 def agent_session(options: AgentOptions, *, trace: EventSink | None = None,
                   trace_strict: bool = False, cancel_check: Callable[[], None] | None = None,
-                  verbose: bool = True):
+                  verbose: bool = True, artifact_dir: Path | None = None):
     main_settings, vision_settings = model_settings(options)
     with ExitStack() as stack:
         model = create_model(stack, **main_settings)
+        verifier = ModelVisionAdapter(model) if options.desktop else None
         vision = None
         if vision_settings:
             vision = ModelVisionAdapter(create_model(stack, **vision_settings))
             model = TextOnlyModel(model)
         desktop = None
+        workflow = None
         registry = ToolRegistry() if options.desktop and not options.with_local_tools else create_default_registry()
         if options.desktop:
             from adapters.windows_desktop import WindowsDesktop
 
-            desktop = stack.enter_context(WindowsDesktop(max_image_size=options.screenshot_size))
-            register_desktop_tools(registry, desktop, vision=vision)
+            if options.record_desktop and artifact_dir is None:
+                import uuid
+                artifact_dir = ROOT / ".agent-logs" / f"{uuid.uuid4().hex}.frames"
+            desktop = stack.enter_context(WindowsDesktop(max_image_size=options.screenshot_size,
+                stability_timeout=options.stability_timeout, recovery_limit=options.desktop_recovery_limit,
+                artifact_dir=artifact_dir if options.record_desktop else None))
+            workflow = DesktopWorkflow(desktop, vision or verifier)
+            register_desktop_tools(registry, desktop, vision=vision, workflow=workflow)
 
         def check_cancelled():
             if cancel_check is not None:
@@ -147,6 +165,8 @@ def agent_session(options: AgentOptions, *, trace: EventSink | None = None,
         agent = Agent(
             model, registry, environment, max_turns=options.max_turns or (50 if options.desktop else 10),
             cancel_check=check_cancelled, trace=trace, trace_strict=trace_strict, verbose=verbose,
+            completion_check=workflow.finish if workflow else None, on_run_start=workflow.start if workflow else None,
+            on_observation=workflow.observe if workflow else None,
             run_config={
                 "mode": "desktop" if options.desktop else "local",
                 "vision_mode": options.vision_mode if options.desktop else None,
