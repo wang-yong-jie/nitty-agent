@@ -84,6 +84,7 @@ def register_desktop_tools(
             "desktop_" + name, description, properties, required, handler,
             requires_single_call=True, instructions=instructions,
             sensitive_parameters=sensitive_parameters,
+            effect="read" if name in {"screenshot", "crop", "wait"} else "write",
         )
 
     add("screenshot", "获取主显示器截图及 frame_id。首次操作和出错后先调用；每轮仅调用一个桌面工具。", {}, [])
@@ -147,10 +148,11 @@ def register_desktop_tools(
             {"question": {"type": "string", "minLength": 1, "maxLength": 2000,
                           "description": "针对当前界面的具体问题；定位时描述目标，验证时说明期望结果"}, "frame_id": frame},
             ["question"], ask, requires_single_call=True, instructions=instructions,
+            effect="read",
         )
 
     if workflow is not None:
         registry.register("desktop_verify", "独立验证预期结果，返回 achieved/unmet/uncertain 和可见证据。",
             {"expected": {"type": "string", "minLength": 1, "maxLength": 2000}, "frame_id": frame},
             ["expected"], lambda _environment, **arguments: workflow.verify(**arguments),
-            requires_single_call=True, instructions=instructions)
+            requires_single_call=True, instructions=instructions, effect="read")

@@ -70,3 +70,20 @@ class DesktopWorkflow:
         if observation.error_info and observation.error_info.code == "RECOVERY_EXHAUSTED":
             raise ToolExecutionError("RECOVERY_EXHAUSTED", "桌面连续无进展，恢复预算已耗尽；停止本次任务，请核实当前界面后继续。",
                                      phase="recovery")
+
+    def snapshot(self):
+        recovery = self.desktop.recovery
+        return {"desktop": {"stalled": recovery.stalled, "repeated": recovery.repeated,
+                            "signature": recovery.signature,
+                            "input_attempted": self.desktop.action_count != self.run_start_actions}}
+
+    def restore(self, extensions):
+        data = extensions.get("desktop", {})
+        recovery = self.desktop.recovery
+        recovery.stalled = data.get("stalled", 0)
+        recovery.repeated = data.get("repeated", 0)
+        recovery.signature = data.get("signature")
+        if data.get("input_attempted"):
+            self.run_start_actions = -1
+        # 恢复后不存在可用于输入的旧截图。
+        self.desktop.frame = None

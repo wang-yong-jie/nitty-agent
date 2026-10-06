@@ -985,6 +985,105 @@
         }
       }
     },
+    "/api/tasks/{task_id}/resume": {
+      "post": {
+        "summary": "Resume Task",
+        "operationId": "resume_task",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskResume"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            },
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
     "/api/tasks/{task_id}/events": {
       "get": {
         "summary": "Events",
@@ -1235,6 +1334,84 @@
   },
   "components": {
     "schemas": {
+      "ActionRecord": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "tool": {
+            "type": "string",
+            "title": "Tool"
+          },
+          "fingerprint": {
+            "type": "string",
+            "title": "Fingerprint"
+          },
+          "effect": {
+            "type": "string",
+            "title": "Effect"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolution"
+          },
+          "recovery_checks": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Checks"
+          },
+          "observation_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Hash"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tool",
+          "fingerprint",
+          "effect",
+          "status"
+        ],
+        "title": "ActionRecord"
+      },
       "ApiError": {
         "properties": {
           "detail": {
@@ -1337,6 +1514,58 @@
           "side_effects"
         ],
         "title": "ErrorDetail"
+      },
+      "MilestoneRecord": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "success_criteria": {
+            "type": "string",
+            "title": "Success Criteria"
+          },
+          "checks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Checks"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "blocked"
+            ],
+            "title": "Status"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "success_criteria",
+          "status"
+        ],
+        "title": "MilestoneRecord"
       },
       "RunOptions": {
         "properties": {
@@ -1483,6 +1712,11 @@
             "type": "boolean",
             "title": "Record Desktop",
             "default": false
+          },
+          "long_horizon": {
+            "type": "boolean",
+            "title": "Long Horizon",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -1568,6 +1802,21 @@
           "omitted_messages": {
             "type": "integer",
             "title": "Omitted Messages"
+          },
+          "summary_mode": {
+            "type": "string",
+            "enum": [
+              "none",
+              "semantic",
+              "extractive"
+            ],
+            "title": "Summary Mode",
+            "default": "none"
+          },
+          "compaction_runs": {
+            "type": "integer",
+            "title": "Compaction Runs",
+            "default": 0
           }
         },
         "type": "object",
@@ -1644,6 +1893,108 @@
           "data"
         ],
         "title": "TaskEvent"
+      },
+      "TaskProgress": {
+        "properties": {
+          "goal": {
+            "type": "string",
+            "title": "Goal"
+          },
+          "milestones": {
+            "items": {
+              "$ref": "#/components/schemas/MilestoneRecord"
+            },
+            "type": "array",
+            "title": "Milestones"
+          },
+          "facts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Facts"
+          },
+          "constraints": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Constraints"
+          },
+          "decisions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Decisions"
+          },
+          "current_step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Step"
+          },
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked Reason"
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/components/schemas/ActionRecord"
+            },
+            "type": "array",
+            "title": "Actions"
+          },
+          "completed_actions": {
+            "type": "integer",
+            "title": "Completed Actions"
+          },
+          "last_progress_turn": {
+            "type": "integer",
+            "title": "Last Progress Turn"
+          },
+          "no_progress_turns": {
+            "type": "integer",
+            "title": "No Progress Turns"
+          },
+          "verification_attempts": {
+            "type": "integer",
+            "title": "Verification Attempts"
+          },
+          "attempt": {
+            "type": "integer",
+            "title": "Attempt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "goal",
+          "milestones",
+          "facts",
+          "constraints",
+          "decisions",
+          "current_step",
+          "blocked_reason",
+          "actions",
+          "completed_actions",
+          "last_progress_turn",
+          "no_progress_turns",
+          "verification_attempts",
+          "attempt"
+        ],
+        "title": "TaskProgress"
       },
       "TaskRecord": {
         "properties": {
@@ -1775,6 +2126,31 @@
                 "type": "null"
               }
             ]
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkpoint_revision": {
+            "type": "integer",
+            "title": "Checkpoint Revision",
+            "default": 0
+          },
+          "resume_available": {
+            "type": "boolean",
+            "title": "Resume Available",
+            "default": false
+          },
+          "attempt": {
+            "type": "integer",
+            "title": "Attempt",
+            "default": 1
           }
         },
         "type": "object",
@@ -1794,6 +2170,21 @@
           "stop_reason"
         ],
         "title": "TaskRecord"
+      },
+      "TaskResume": {
+        "properties": {
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "expected_revision"
+        ],
+        "title": "TaskResume"
       },
       "VerificationRecord": {
         "properties": {

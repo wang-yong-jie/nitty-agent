@@ -13,6 +13,7 @@ from adapters.local import LocalEnvironment
 from adapters.models import ClaudeModel, OpenAICompatibleModel, TextOnlyModel
 from adapters.vision import ModelVisionAdapter
 from adapters.desktop_workflow import DesktopWorkflow
+from adapters.task_reasoning import ModelCompactor, ModelTaskVerifier
 from adapters.windows_apps import WindowsApplicationCatalog
 from contracts import EventSink, ModelAdapter
 from core.agent import Agent
@@ -42,6 +43,7 @@ class AgentOptions:
     stability_timeout: float = 3
     desktop_recovery_limit: int = 6
     record_desktop: bool = False
+    long_horizon: bool = False
 
     def validate(self) -> None:
         if self.provider not in PROVIDER_KEYS:
@@ -163,10 +165,14 @@ def agent_session(options: AgentOptions, *, trace: EventSink | None = None,
                 environment.exec_command, cancel_check=check_cancelled,
             ))
         agent = Agent(
-            model, registry, environment, max_turns=options.max_turns or (50 if options.desktop else 10),
+            model, registry, environment, max_turns=options.max_turns or (200 if options.long_horizon else 50 if options.desktop else 10),
             cancel_check=check_cancelled, trace=trace, trace_strict=trace_strict, verbose=verbose,
             completion_check=workflow.finish if workflow else None, on_run_start=workflow.start if workflow else None,
             on_observation=workflow.observe if workflow else None,
+            long_horizon=options.long_horizon, task_verifier=ModelTaskVerifier(model) if options.long_horizon else None,
+            desktop_verifier=(lambda expected: workflow.verify(expected, scope="task").data["verification"]) if workflow else None,
+            compactor=ModelCompactor(model) if options.long_horizon else None,
+            snapshot_extension=workflow.snapshot if workflow else None, restore_extension=workflow.restore if workflow else None,
             run_config={
                 "mode": "desktop" if options.desktop else "local",
                 "vision_mode": options.vision_mode if options.desktop else None,

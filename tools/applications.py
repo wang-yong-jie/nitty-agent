@@ -30,5 +30,5 @@ def register_application_tools(registry: ToolRegistry, catalog: ApplicationCatal
     registry.register(
         "app_find", "只读查询 Windows 应用注册、AppX 包、快捷方式和安装信息；返回候选及检查范围，不启动应用。",
         {"name": {"type": "string", "minLength": 1, "maxLength": 200, "description": "应用名称或其有辨识度的部分"}},
-        ["name"], find, instructions=APPLICATION_INSTRUCTIONS,
+        ["name"], find, instructions=APPLICATION_INSTRUCTIONS, effect="read",
     )

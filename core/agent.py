@@ -23,11 +23,15 @@ class Agent:
         session: Session | None = None,
         on_session_update: Callable[[Session], None] | None = None,
         completion_check=None, on_run_start=None, on_observation=None,
+        long_horizon=False, task_verifier=None, desktop_verifier=None, compactor=None,
+        on_checkpoint=None, snapshot_extension=None, restore_extension=None,
     ):
         self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check, trace,
                                     trace_strict=trace_strict, run_config=run_config,
                                     completion_check=completion_check, on_run_start=on_run_start,
-                                    on_observation=on_observation)
+                                    on_observation=on_observation, long_horizon=long_horizon, task_verifier=task_verifier,
+                                    desktop_verifier=desktop_verifier, compactor=compactor, on_checkpoint=on_checkpoint,
+                                    snapshot_extension=snapshot_extension, restore_extension=restore_extension)
         self.runtime.session = session if session is not None else Session()
         self.runtime.on_session_update = on_session_update
 
@@ -44,6 +48,14 @@ class Agent:
         """提交一个任务，返回最终回答；执行失败时抛出异常。"""
         state = self.runtime.run(task)
         return state.answer or ""
+
+    def resume(self, checkpoint: dict) -> str:
+        """从已持久化状态重新决策；不重放中断前的调用。"""
+        return self.runtime.run(checkpoint["task"], checkpoint=checkpoint).answer or ""
+
+    @property
+    def last_checkpoint(self):
+        return self.runtime.last_checkpoint
 
     @property
     def last_state(self) -> AgentState | None:

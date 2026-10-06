@@ -19,6 +19,7 @@ class TaskStore:
         self.lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (
@@ -27,6 +28,9 @@ class TaskStore:
             );
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY, record TEXT NOT NULL, history TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                task_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL
             );
         """)
         self.db.commit()
@@ -81,7 +85,8 @@ class TaskStore:
         with self.lock, self.db:
             record = self.get_session(history["id"])
             record.update(updated_at=datetime.now(timezone.utc).isoformat(), working_directory=history["working_directory"],
-                          omitted_messages=history["omitted_messages"])
+                          omitted_messages=history["omitted_messages"], summary_mode=history["summary_mode"],
+                          compaction_runs=history["compaction_runs"])
             if options is not None:
                 record["options"] = options
             if title is not None:
@@ -95,7 +100,7 @@ class TaskStore:
         with self.lock:
             rows = self.db.execute("SELECT record FROM tasks WHERE json_extract(record, '$.session_id') = ? ORDER BY rowid",
                                    (session_id,)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return self._resume_projection([json.loads(row[0]) for row in rows])
 
     def delete_session(self, session_id: str) -> list[str]:
         """原子删除会话、关联任务和事件；返回任务 ID 供服务清理日志。"""
@@ -106,6 +111,7 @@ class TaskStore:
             self.db.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM tasks WHERE json_extract(record, '$.session_id') = ?)",
                             (session_id,))
             self.db.execute("DELETE FROM tasks WHERE json_extract(record, '$.session_id') = ?", (session_id,))
+            self.db.executemany("DELETE FROM checkpoints WHERE task_id = ?", [(task["id"],) for task in tasks])
             self.db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return [task["id"] for task in tasks]
 
@@ -117,6 +123,10 @@ class TaskStore:
     def save_status(self, record: dict, timestamp: str) -> None:
         """任务终态和最后一个事件在同一事务中提交，避免 SSE 提前关闭。"""
         with self.lock, self.db:
+            checkpoint = self.db.execute("SELECT revision, data FROM checkpoints WHERE task_id = ?", (record["id"],)).fetchone()
+            if checkpoint:
+                record["checkpoint_revision"] = checkpoint[0]
+                record["resume_available"] = record["status"] not in ACTIVE | {"completed"} and json.loads(checkpoint[1])["status"] != "completed"
             self.db.execute("INSERT OR REPLACE INTO tasks VALUES (?, ?)",
                             (record["id"], json.dumps(record, ensure_ascii=False, allow_nan=False)))
             last = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (record["id"],)).fetchone()[0]
@@ -124,17 +134,57 @@ class TaskStore:
             self.db.execute("INSERT INTO events VALUES (?, ?, ?)",
                             (record["id"], last + 1, json.dumps(data, ensure_ascii=False, allow_nan=False)))
 
+    def checkpoint(self, task_id):
+        with self.lock:
+            row = self.db.execute("SELECT revision, data FROM checkpoints WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return row[0], json.loads(row[1])
+
+    def save_checkpoint(self, task_id, data, timestamp):
+        from core.checkpoint import restore
+        restore(data, resuming=False)
+        with self.lock, self.db:
+            record = self.get(task_id)
+            if data.get("task_id") != task_id or data["task"] != record["task"] or data["session_id"] != record["session_id"]:
+                raise ValueError("执行快照归属不匹配。")
+            if record["status"] not in ACTIVE:
+                raise ValueError("终态任务不能写入执行快照。")
+            row = self.db.execute("SELECT revision FROM checkpoints WHERE task_id = ?", (task_id,)).fetchone()
+            revision = row[0] + 1 if row else 1
+            self.db.execute("INSERT OR REPLACE INTO checkpoints VALUES (?, ?, ?)",
+                            (task_id, revision, json.dumps(data, ensure_ascii=False, allow_nan=False)))
+            from core.task_memory import TaskMemory
+            record.update(checkpoint_revision=revision, progress=TaskMemory.from_dict(data["memory"]).progress(),
+                          attempt=data["memory"]["attempt"], turn=data["turn"], resume_available=False)
+            self.db.execute("INSERT OR REPLACE INTO tasks VALUES (?, ?)",
+                            (task_id, json.dumps(record, ensure_ascii=False, allow_nan=False)))
+            last = self.db.execute("SELECT COALESCE(MAX(id), 0) FROM events WHERE task_id = ?", (task_id,)).fetchone()[0]
+            self.db.execute("INSERT INTO events VALUES (?, ?, ?)", (task_id, last + 1,
+                            json.dumps({"event": "task_updated", "timestamp": timestamp, "task": record}, ensure_ascii=False)))
+        return revision
+
     def get(self, task_id: str) -> dict:
         with self.lock:
             row = self.db.execute("SELECT record FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(task_id)
-        return json.loads(row[0])
+        return self._resume_projection([json.loads(row[0])])[0]
+
+    def _resume_projection(self, records):
+        # 更早的快照不能覆盖同一会话中随后发生的用户问答。
+        with self.lock:
+            latest = dict(self.db.execute("SELECT json_extract(record, '$.session_id'), MAX(json_extract(record, '$.created_at')) "
+                                          "FROM tasks GROUP BY json_extract(record, '$.session_id')").fetchall())
+        for record in records:
+            if record.get("resume_available") and record["created_at"] < latest.get(record.get("session_id"), record["created_at"]):
+                record["resume_available"] = False
+        return records
 
     def list(self, limit: int = 100) -> list[dict]:
         with self.lock:
             rows = self.db.execute("SELECT record FROM tasks ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return self._resume_projection([json.loads(row[0]) for row in rows])
 
     def append(self, task_id: str, data: dict) -> dict:
         with self.lock, self.db:

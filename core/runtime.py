@@ -13,6 +13,9 @@ from contracts import (
 from core.state import AgentState
 from core.session import Session
 from core.tooling import ToolExecutor, ToolRegistry
+from core.task_memory import TaskMemory
+from core.task_controller import TaskController
+from core.checkpoint import snapshot, restore, CheckpointWriteError
 from tracing import RunLogger
 
 
@@ -26,6 +29,8 @@ class AgentRuntime:
         trace: EventSink | None = None,
         *, trace_strict: bool = False, run_config: dict | None = None,
         completion_check=None, on_run_start=None, on_observation=None,
+        long_horizon=False, task_verifier=None, desktop_verifier=None, compactor=None,
+        on_checkpoint=None, snapshot_extension=None, restore_extension=None,
     ):
         if type(max_turns) is not int or max_turns < 1:
             raise ValueError("max_turns 必须是正整数。")
@@ -47,18 +52,45 @@ class AgentRuntime:
         self.completion_check = completion_check
         self.on_run_start = on_run_start
         self.on_observation = on_observation
+        self.long_horizon = long_horizon
+        self.compactor = compactor
+        self.on_checkpoint = on_checkpoint
+        self.snapshot_extension, self.restore_extension = snapshot_extension, restore_extension
+        self.last_checkpoint = None
+        self.checkpoint_phase = "setup"
+        self.controller = TaskController(self, task_verifier, desktop_verifier)
+        self.control_registered = False
+        if long_horizon:
+            self.controller.register()
+            self.control_registered = True
 
     def _checkpoint(self, state: AgentState) -> None:
-        self.session.omitted_messages = state.omitted_messages
+        self.session.omitted_messages = max(self.session.omitted_messages, state.omitted_messages)
         self.session.update(state.messages)
         directory = getattr(self.environment, "working_directory", None)
         if directory is not None:
             self.session.working_directory = str(directory)
         if self.on_session_update is not None:
             self.on_session_update(self.session)
+        self._save_checkpoint(state)
+
+    def _save_checkpoint(self, state):
+        if state is self.state and state.memory is not None:
+            state.run_id = self.logger.run_id
+            self.last_checkpoint = snapshot(state, self.session, self.checkpoint_phase,
+                self.snapshot_extension() if self.snapshot_extension else {})
+            if self.on_checkpoint is not None:
+                try:
+                    self.on_checkpoint(self.last_checkpoint)
+                except (AgentCancelled, KeyboardInterrupt):
+                    raise
+                except Exception as error:
+                    raise CheckpointWriteError(f"执行快照保存失败，已停止后续操作：{error}") from error
 
     @staticmethod
     def _error_info(error: Exception, phase: str) -> ErrorInfo:
+        if isinstance(error, CheckpointWriteError):
+            return ErrorInfo("CHECKPOINT_WRITE_FAILED", "checkpoint", str(error), "possible", type(error).__name__)
         if isinstance(error, ToolFailure):
             return error.info
         code = "TRACE_WRITE_FAILED" if isinstance(error, TraceWriteError) else (
@@ -78,19 +110,36 @@ class AgentRuntime:
             is_error=observation.error is not None, images=observation.images,
         ))
 
-    def run(self, task: str) -> AgentState:
+    def run(self, task: str, *, checkpoint=None) -> AgentState:
         """执行状态属于本次任务；历史继承会话，结束后保留状态供检查。"""
         if not task.strip():
             raise ValueError("任务不能为空。")
-        state = AgentState(task=task, session_id=self.session.id, omitted_messages=self.session.omitted_messages,
-                           messages=[*self.session.messages, Message(role="user", content=task)])
+        if checkpoint is not None:
+            state = restore(checkpoint)
+            if task != state.task:
+                raise ValueError("恢复时不能更改任务目标，请新建任务。")
+            self.session = Session.from_dict(checkpoint["session"])
+            self.long_horizon = True
+            if not self.control_registered:
+                self.controller.register()
+                self.control_registered = True
+            state.messages.append(Message("user", "[自动恢复观察，不是新的用户指令] 从已保存的任务状态继续，"
+                "已完成步骤先核实产物；未决动作不得重放。所有桌面画面均已失效，必须重新截图。"))
+        else:
+            state = AgentState(task=task, session_id=self.session.id, omitted_messages=self.session.omitted_messages,
+                               messages=[*self.session.messages, Message(role="user", content=task)], memory=TaskMemory(task))
+        self.session.compactor = self.compactor
         self.state = state
+        first_turn = state.turn + 1
         run_started = time.perf_counter()
         phase = "setup"
         completion_checks = 0
         try:
             if self.on_run_start is not None:
                 self.on_run_start()
+            if checkpoint is not None and self.restore_extension is not None:
+                self.restore_extension(checkpoint.get("extensions", {}))
+            self.checkpoint_phase = "ready"
             self._checkpoint(state)
             # 只记录调用方显式提供的非敏感配置，不遍历模型对象或保存用户任务。
             self.logger.start(config=self.run_config, max_turns=self.max_turns,
@@ -99,10 +148,14 @@ class AgentRuntime:
             getter = getattr(self.model, "get_info", None)
             if callable(getter):
                 self.logger.emit("model_configured", model=getter())
-            for turn in range(1, self.max_turns + 1):
+            for turn in range(first_turn, first_turn + self.max_turns):
                 phase = "cancellation"
                 self.cancel_check()
                 state.turn = turn
+                if self.long_horizon:
+                    state.messages = self.session.compact(state.messages)
+                state.context_summary = self.session.summary
+                state.omitted_messages = self.session.omitted_messages
                 if self.verbose:
                     print(f"\n[第 {turn} 轮] 调用模型")
                 specs = self.registry.specs()
@@ -140,14 +193,19 @@ class AgentRuntime:
                 self.cancel_check()
                 state.messages.append(Message("assistant", reply.content, reply.tool_calls))
                 if not reply.tool_calls:
-                    if self.completion_check is not None:
+                    if self.completion_check is not None or self.long_horizon:
                         phase = "verification"
                         self.logger.emit("verification_started", turn=turn)
-                        state.verification = self.completion_check(task)
+                        state.verification = self.controller.finish(reply.content) if self.long_horizon else self.completion_check(task)
+                        if state.verification and state.verification["status"] == "achieved" and self.completion_check is not None and self.long_horizon:
+                            additional = self.completion_check(task)
+                            if additional is not None:
+                                state.verification = additional
                         self.logger.emit("verification_finished", turn=turn, verification=state.verification)
                         self.cancel_check()
                         if state.verification and state.verification["status"] != "achieved":
                             completion_checks += 1
+                            state.memory.verification_attempts += 1
                             if completion_checks >= 2:
                                 state.error_info = ErrorInfo("TARGET_UNVERIFIED", phase,
                                     "目标尚未验证成功：" + state.verification["evidence"], "possible")
@@ -162,6 +220,14 @@ class AgentRuntime:
                     state.stop_reason = "model_answer"
                     break
 
+                actions = {}
+                for call in reply.tool_calls:
+                    try:
+                        effect = self.registry.get(call.name).effect
+                    except KeyError:
+                        effect = "unknown"
+                    actions[call.id] = state.memory.plan_action(call, effect)
+                self.checkpoint_phase = "planned"
                 self._checkpoint(state)
 
                 # 先记录整组调用，再逐一执行并回传，每个结果都与调用 ID 配对。
@@ -179,6 +245,16 @@ class AgentRuntime:
 
                     def execution_started():
                         nonlocal executed
+                        action = actions[call.id]
+                        if self.long_horizon:
+                            state.memory.guard(action)
+                        probe = self.registry.get(call.name).recovery_probe
+                        if probe is not None:
+                            action.recovery_checks = probe(self.environment, json.loads(call.arguments))
+                        action.status = "started"
+                        self.checkpoint_phase = "executing"
+                        self._checkpoint(state)
+                        self.cancel_check()
                         self.logger.emit("tool_execution_started", turn=turn, call_id=call.id, tool=call.name,
                                          validation="passed")
                         executed = True
@@ -189,6 +265,8 @@ class AgentRuntime:
                             self.executor.reject(call, "BATCH_REJECTED", batch_error)
                             if batch_error else self.executor.execute(call, on_execution_start=execution_started)
                         )
+                    except ToolFailure as error:
+                        observation = Observation(call.id, call.name, error=str(error), status="rejected", error_info=error.info)
                     except (AgentCancelled, KeyboardInterrupt) as error:
                         info = ErrorInfo("CANCELLED", "execution" if executed else "validation", str(error) or "用户中止任务。",
                                          "possible" if executed else "none", type(error).__name__)
@@ -202,11 +280,17 @@ class AgentRuntime:
                         raise
                     duration = time.perf_counter() - started
                     self._record(state, observation)
+                    state.memory.observed(actions[call.id], observation, state.turn)
+                    self.checkpoint_phase = "observed"
                     self._checkpoint(state)
                     self.logger.tool_finished(observation, turn, duration)
                     if self.on_observation is not None:
                         phase = "observation"
                         self.on_observation(observation)
+                    if self.long_horizon and state.memory.no_progress_turns >= 8:
+                        state.memory.blocked_reason = "连续八次操作未获得新的进展证据。"
+                        state.error_info = ErrorInfo("NO_PROGRESS", "progress", state.memory.blocked_reason, "possible")
+                        raise RuntimeError(state.error_info.message)
                 # Observation 进入历史，下一轮由模型根据真实结果重新决策。
             else:
                 phase = "runtime"
@@ -252,4 +336,25 @@ class AgentRuntime:
                 # 补齐取消时未返回的工具结果只作用于会话，不改变原始执行状态。
                 saved_state = AgentState(task=state.task, messages=history, omitted_messages=state.omitted_messages)
                 self._checkpoint(saved_state)
+                self.checkpoint_phase = "finished"
+                # 最终快照仍保存真实执行状态，不能被仅供会话的补齐历史覆盖。
+                try:
+                    self._save_checkpoint(state)
+                except (AgentCancelled, KeyboardInterrupt) as error:
+                    if state.error is None:
+                        state.status, state.stop_reason, state.error = "cancelled", "user_cancelled", str(error) or "用户中止任务。"
+                        state.answer = None
+                        state.error_info = ErrorInfo("CANCELLED", "checkpoint", state.error, "possible", type(error).__name__)
+                        self.last_checkpoint = snapshot(state, self.session, "finished",
+                            self.snapshot_extension() if self.snapshot_extension else {})
+                        raise
+                except Exception as error:
+                    if state.error is None:
+                        state.status, state.stop_reason, state.error = "failed", "checkpoint_failure", str(error)
+                        state.answer = None
+                        state.error_info = self._error_info(error, "checkpoint")
+                        # 即使最终持久化失败，进程内检查和恢复也不能看到 completed。
+                        self.last_checkpoint = snapshot(state, self.session, "finished",
+                            self.snapshot_extension() if self.snapshot_extension else {})
+                        raise
         return state

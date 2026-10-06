@@ -6,6 +6,7 @@ from pathlib import Path
 import multiprocessing
 import json
 import traceback
+import time
 
 from bootstrap import AgentOptions, agent_session
 from contracts import AgentCancelled
@@ -36,7 +37,7 @@ class TaskTrace:
 
 
 def run_task(task_id: str, task: str, options: AgentOptions, cancel, channel, trace_path: str,
-             session_data: dict | None = None) -> None:
+             session_data: dict | None = None, *, checkpoint_data=None, checkpoint_ack=None) -> None:
     """仅接收可序列化配置和 IPC 对象；桌面控制器不能从父进程传入。"""
     session = None
     redactor = LogRedactor()
@@ -78,12 +79,28 @@ def run_task(task_id: str, task: str, options: AgentOptions, cancel, channel, tr
                 channel.put({"type": "session", "data": data})
 
             session.agent.runtime.on_session_update = save_conversation
+
+            def save_checkpoint(data):
+                from core.checkpoint import CheckpointWriteError
+                redactor.secrets.update(LogRedactor().secrets)
+                data = redactor.clean({**data, "task_id": task_id})
+                if checkpoint_ack is not None:
+                    checkpoint_ack.clear()
+                channel.put({"type": "checkpoint", "data": data})
+                if checkpoint_ack is not None:
+                    deadline = time.monotonic() + 15
+                    while not checkpoint_ack.wait(0.05):
+                        check_cancelled()
+                        if time.monotonic() > deadline:
+                            raise CheckpointWriteError("父服务未确认快照持久化。")
+
+            session.agent.runtime.on_checkpoint = save_checkpoint
             check_cancelled()
             phase = "prepare"
             session.prepare()
             check_cancelled()
             phase = "run"
-            result["answer"] = session.agent.run(task)
+            result["answer"] = session.agent.resume(checkpoint_data) if checkpoint_data else session.agent.run(task)
             phase = "cleanup"
         result["status"] = "completed"
     except (AgentCancelled, KeyboardInterrupt) as error:

@@ -1,6 +1,22 @@
 """文件和 Shell 工具定义；操作委托给注入的 Environment。"""
 
 from core.tooling import ToolRegistry
+import hashlib
+
+
+def write_recovery_checks(environment, arguments):
+    path = arguments["path"]
+    post = {"kind": "file_sha256", "path": path, "expected": hashlib.sha256(arguments["content"].encode("utf-8")).hexdigest()}
+    pre = None
+    try:
+        data = environment.read_file(path)
+        if not data.get("truncated"):
+            pre = {"kind": "file_sha256", "path": path, "expected": hashlib.sha256(data["content"].encode("utf-8")).hexdigest()}
+    except (FileNotFoundError, KeyError):
+        pre = {"kind": "file_absent", "path": path}
+    except (OSError, UnicodeError):
+        pass
+    return {"post": post, "pre": pre}
 
 
 def create_default_registry() -> ToolRegistry:
@@ -31,7 +47,7 @@ def create_default_registry() -> ToolRegistry:
         "read_file", "读取 UTF-8 文本文件，最多返回 20000 个字符并标记截断。",
         {"path": {"type": "string", "description": "绝对路径或相对于工作目录的路径"}}, ["path"],
         lambda environment, **arguments: environment.read_file(**arguments),
-        instructions="读取文本使用 read_file；读取被截断时不要根据部分内容覆盖原文件。",
+        instructions="读取文本使用 read_file；读取被截断时不要根据部分内容覆盖原文件。", effect="read",
     )
     registry.register(
         "write_file", "创建或覆盖 UTF-8 文本文件。编辑已有文件前先读取内容。",
@@ -42,5 +58,7 @@ def create_default_registry() -> ToolRegistry:
         lambda environment, **arguments: environment.write_file(**arguments),
         instructions="编辑已有文件前先读取，再用 write_file 写入完整内容；写完代码后按需运行验证。",
         sensitive_parameters=("content",),
+        effect="write",
+        recovery_probe=write_recovery_checks,
     )
     return registry

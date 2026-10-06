@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from fastapi.staticfiles import StaticFiles
 
-from api.schemas import ApiError, Capabilities, SessionCreate, SessionDeleteResult, SessionRecord, TaskCreate, TaskEvent, TaskRecord
+from api.schemas import ApiError, Capabilities, SessionCreate, SessionDeleteResult, SessionRecord, TaskCreate, TaskEvent, TaskRecord, TaskResume
 from bootstrap import AgentOptions, PROVIDER_KEYS, ROOT, load_settings, model_settings
 from service.manager import TaskBusy, TaskManager
 from service.store import ACTIVE
@@ -150,6 +150,19 @@ def create_app(*, data_dir: Path | None = None, trace_dir: Path | None = None,
     def stop_task(task_id: str):
         get_task(task_id)
         return manager().stop(task_id)
+
+    @app.post("/api/tasks/{task_id}/resume", response_model=TaskRecord, status_code=202, operation_id="resume_task")
+    def resume_task(task_id: str, body: TaskResume):
+        record = get_task(task_id)
+        try:
+            validate_options(AgentOptions(**record["options"]))
+            return manager().resume(task_id, body.expected_revision)
+        except KeyError:
+            raise HTTPException(404, "没有可恢复的执行快照。") from None
+        except TaskBusy as error:
+            raise HTTPException(409, str(error)) from None
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(422, str(error)) from None
 
     @app.get("/api/tasks/{task_id}/events", response_model=list[TaskEvent], operation_id="get_events")
     def events(task_id: str, after: int = Query(default=0, ge=0), limit: int = Query(default=200, ge=1, le=500)):

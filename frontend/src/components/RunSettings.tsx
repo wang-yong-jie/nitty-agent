@@ -9,6 +9,7 @@ export const defaultOptions: RunOptions = {
   vision_provider: null, vision_model: null, vision_base_url: null,
   max_turns: null, screenshot_size: 1600,
   stability_timeout: 3, desktop_recovery_limit: 6, record_desktop: false,
+  long_horizon: false,
 };
 
 export default function RunSettings({ value, onChange, capabilities }: Props) {
@@ -17,6 +18,8 @@ export default function RunSettings({ value, onChange, capabilities }: Props) {
     value: provider, label: `${provider === 'deepseek' ? 'DeepSeek' : provider === 'openai' ? 'OpenAI' : 'Claude'}${capabilities?.providers[provider] ? '' : ' · 未配置密钥'}`,
   }));
   return <div className="settings">
+    <div className="field"><Checkbox checked={value.long_horizon ?? false} onChange={event => set({ long_horizon: event.target.checked })}>长任务模式</Checkbox>
+      <p className="muted">保存计划与进展，验收每个步骤，历史过长时生成摘要。</p></div>
     <div className="field-grid">
       <label>模型提供方<Select aria-label="模型提供方" value={value.provider} options={providerOptions}
         onChange={provider => set({ provider, model: provider === 'deepseek' ? 'deepseek-flash' : '' })} /></label>
@@ -58,7 +61,7 @@ export default function RunSettings({ value, onChange, capabilities }: Props) {
         onChange={event => set({ base_url: event.target.value || null })} /></label>
       <div className="field-grid">
         <label>最大轮次<InputNumber aria-label="最大轮次" min={1} max={1000} value={value.max_turns}
-          placeholder={value.desktop ? '默认 50' : '默认 10'} onChange={max_turns => set({ max_turns })} /></label>
+          placeholder={value.long_horizon ? '默认 200' : value.desktop ? '默认 50' : '默认 10'} onChange={max_turns => set({ max_turns })} /></label>
         {value.desktop && <label>截图最长边<InputNumber aria-label="截图最长边" min={640} max={3840} step={160}
           value={value.screenshot_size} onChange={screenshot_size => set({ screenshot_size: screenshot_size ?? 1600 })} /></label>}
       </div>

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass, field, replace
 import json
+import hashlib
 import uuid
 
 from contracts import Message, ToolCall
@@ -77,10 +78,52 @@ class Session:
     working_directory: str | None = None
     max_history_chars: int = 64000
     max_history_messages: int = 160
+    summary: str = ""
+    summary_mode: str = "none"
+    compaction_runs: int = 0
+    compacted_hash: str = ""
+    compactor: object = field(default=None, repr=False, compare=False)
+
+    def compact(self, messages):
+        history, omitted = trim_history(messages, self.max_history_chars, self.max_history_messages)
+        if not omitted:
+            return history
+        retained = {id(message) for message in history}
+        removed = [{"role": item.role, "content": (item.content or "")[:2000],
+                    "tools": [{"id": call.id, "name": call.name, "arguments": call.arguments[:1000]} for call in item.tool_calls]}
+                   for item in messages if id(item) not in retained]
+        digest = hashlib.sha256(json.dumps(removed, ensure_ascii=False).encode()).hexdigest()
+        if digest != self.compacted_hash:
+            # 摘要请求本身也有预算；任务目标及结构化状态不依赖这个摘要。
+            selected, budget = [], 0
+            for item in reversed(removed):
+                size = len(json.dumps(item, ensure_ascii=False))
+                if budget + size > 24000:
+                    break
+                selected.insert(0, item)
+                budget += size
+            try:
+                if self.compactor is None:
+                    raise ValueError("未配置模型摘要器")
+                summary = self.compactor(self.summary, selected)
+                if not isinstance(summary, str) or not 1 <= len(summary) <= 8000:
+                    raise ValueError("摘要长度无效")
+                self.summary, self.summary_mode = summary, "semantic"
+            except BaseException as error:
+                from contracts import AgentCancelled
+                if isinstance(error, (AgentCancelled, KeyboardInterrupt, SystemExit)):
+                    raise
+                excerpts = "\n".join(f"[{item['role']}] {item['content'][:600]} {json.dumps(item['tools'], ensure_ascii=False)[:400]}"
+                                     for item in selected)
+                self.summary = ("[摘要器不可用，以下为历史片段，可能不完整]\n" + self.summary[-3500:] + "\n" + excerpts[-4000:])[:8000]
+                self.summary_mode = "extractive"
+            self.compaction_runs += 1
+            self.compacted_hash = digest
+            self.omitted_messages += omitted
+        return history
 
     def update(self, messages: list[Message]) -> None:
-        history, omitted = trim_history(complete_history(messages), self.max_history_chars, self.max_history_messages)
-        self.omitted_messages += omitted
+        history = self.compact(complete_history(messages))
         # 截图只用于本次执行，不落盘，也不让追问误用已经过期的桌面画面。
         self.messages = [replace(message, images=[], content=(message.content or "") +
                                  ("\n[历史截图未保留，请重新截图核实当前画面。]" if message.images else ""))
@@ -90,7 +133,9 @@ class Session:
         return {"id": self.id, "messages": [{key: value for key, value in asdict(message).items() if key != "images"}
                                             for message in self.messages],
                 "omitted_messages": self.omitted_messages, "working_directory": self.working_directory,
-                "max_history_chars": self.max_history_chars, "max_history_messages": self.max_history_messages}
+                "max_history_chars": self.max_history_chars, "max_history_messages": self.max_history_messages,
+                "summary": self.summary, "summary_mode": self.summary_mode, "compaction_runs": self.compaction_runs,
+                "compacted_hash": self.compacted_hash}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":

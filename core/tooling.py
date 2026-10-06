@@ -25,6 +25,8 @@ class RegisteredTool:
     requires_single_call: bool = False
     sensitive_parameters: tuple[str, ...] = ()
     validator: ArgumentValidator | None = None
+    effect: str = "unknown"
+    recovery_probe: Callable | None = None
 
 
 class ToolRegistry:
@@ -37,6 +39,8 @@ class ToolRegistry:
         self, name: str, description: str, properties: dict, required: list[str], handler: Callable,
         *, requires_single_call: bool = False, instructions: str = "",
         sensitive_parameters: tuple[str, ...] = (),
+        effect: str = "unknown",
+        recovery_probe: Callable | None = None,
     ) -> None:
         """注册能力及使用规则；处理函数接收 environment 和模型给出的参数。"""
         if name in self._tools:
@@ -53,7 +57,9 @@ class ToolRegistry:
         spec = ToolSpec(name, description, parameters, instructions=instructions)
         # 不自动联网解析远程 $ref；本地片段引用仍由校验器支持。
         validator = ArgumentValidator(deepcopy(parameters), registry=Registry())
-        self._tools[name] = RegisteredTool(spec, handler, requires_single_call, sensitive_parameters, validator)
+        if effect not in {"read", "write", "unknown", "internal"}:
+            raise ValueError("未知的工具副作用类型。")
+        self._tools[name] = RegisteredTool(spec, handler, requires_single_call, sensitive_parameters, validator, effect, recovery_probe)
 
     def specs(self) -> list[ToolSpec]:
         """只把描述交给模型，真实执行函数不会发送给模型。"""
@@ -73,6 +79,8 @@ class ToolExecutor:
 
     def batch_error(self, calls: list[ToolCall]) -> str | None:
         """桌面动作依赖新观察；整批拒绝，避免先执行一部分后再拒绝。"""
+        if len({call.id for call in calls}) != len(calls):
+            return "本轮工具调用 ID 重复；本批所有调用均未执行。"
         if len(calls) > 1:
             for call in calls:
                 try:

@@ -30,8 +30,12 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [resumingId, setResumingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const selected = tasks.find(task => task.id === selectedId);
+  const detailTask = tasks.find(task => task.id === detailId);
+  const detailHasLaterTasks = !!detailTask && tasks.some(task => task.session_id === detailTask.session_id
+    && task.created_at > detailTask.created_at);
   const currentSessionId = selected?.session_id ?? sessionId;
   const currentSessionRef = useRef(currentSessionId);
   currentSessionRef.current = currentSessionId;
@@ -45,7 +49,7 @@ export default function App() {
   const updateTask = useCallback((task: Task) => {
     setTasks(previous => mergeVisibleTasks(previous, [task]));
   }, [mergeVisibleTasks]);
-  const currentEvents = useTaskEvents(selectedId, updateTask);
+  const currentEvents = useTaskEvents(selectedId, updateTask, selected?.attempt ?? 1);
 
   const selectTask = useCallback((id: string | null) => {
     setSelectedId(id);
@@ -189,6 +193,17 @@ export default function App() {
     finally { setStopping(false); }
   }
 
+  async function resumeTask(task: Task) {
+    setResumingId(task.id);
+    try {
+      const response = await api.POST('/api/tasks/{task_id}/resume', { params: { path: { task_id: task.id } },
+        body: { expected_revision: task.checkpoint_revision ?? 0 } });
+      if (response.error) throw response.error;
+      if (response.data) { updateTask(response.data); selectTask(response.data.id); }
+    } catch (failure) { void message.error(apiError(failure)); }
+    finally { setResumingId(null); }
+  }
+
   const missingKey = capabilities && !capabilities.providers[options.provider ?? 'deepseek'];
 
   return <div className="console-shell">
@@ -237,6 +252,8 @@ export default function App() {
             {currentSessionId && <ConversationPanel tasks={conversation} draft={followUp}
               onDraft={setFollowUp} onSelect={setDetailId} onSubmit={() => void submitFollowUp()}
               onStop={task => void stop(task)} stopping={stopping}
+              onResume={task => void resumeTask(task)} resumingId={resumingId}
+              summaryMode={sessions.find(session => session.id === currentSessionId)?.summary_mode}
               omittedMessages={sessions.find(session => session.id === currentSessionId)?.omitted_messages ?? 0}
               submitting={submitting} disabled={!!running || !capabilities} />}
           </>}
@@ -244,8 +261,10 @@ export default function App() {
         <footer className="workspace-footer">Nitty Agent <span>本地执行 · 可追踪的每一步</span></footer>
       </div>
     </main>
-    <TaskExecutionDetails task={tasks.find(task => task.id === detailId)} currentTaskId={selectedId}
+    <TaskExecutionDetails task={detailTask} currentTaskId={selectedId}
       currentEvents={currentEvents} onTask={updateTask} onClose={() => setDetailId(null)}
-      onCopy={task => void newSession(task)} onStop={task => void stop(task)} stopping={stopping} />
+      onCopy={task => void newSession(task)} onStop={task => void stop(task)} stopping={stopping}
+      onResume={task => void resumeTask(task)} resumingId={resumingId}
+      resumeDisabled={!!running || detailHasLaterTasks} />
   </div>;
 }

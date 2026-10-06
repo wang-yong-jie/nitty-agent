@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from PIL import ImageChops, ImageDraw, ImageStat
@@ -61,7 +62,8 @@ class DesktopRecorder:
 
     def __init__(self, directory: Path):
         self.directory = directory
-        self.step = 0
+        self.step = max((int(match[1]) for path in directory.glob("step-*-*.png")
+                         if (match := re.fullmatch(r"step-(\d+)-(?:before|after|target)\.png", path.name))), default=0)
 
     def record(self, before, after, action, arguments, geometry, timing, diff, recovery):
         self.directory.mkdir(parents=True, exist_ok=True)

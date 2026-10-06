@@ -17,6 +17,17 @@ class FakeEventSource {
 beforeEach(() => { FakeEventSource.instances = []; vi.stubGlobal('EventSource', FakeEventSource); });
 
 describe('任务事件订阅', () => {
+  it('恢复同一任务时重新订阅，已关闭的旧执行连接不再更新页面', () => {
+    const onTask = vi.fn();
+    const { result, rerender } = renderHook(({ attempt }) => useTaskEvents('task', onTask, attempt), { initialProps: { attempt: 1 } });
+    const source = FakeEventSource.instances[0];
+    act(() => source.emit('stream_end', {}));
+    rerender({ attempt: 2 });
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(result.current.connection).toBe('connecting');
+    act(() => source.emit('task_event', { id: 99, task_id: 'task', data: { event: 'task_updated', task: {} } }));
+    expect(onTask).not.toHaveBeenCalled();
+  });
   it('断线重连保留事件，去重重放，并以独立任务事件更新终态', () => {
     const onTask = vi.fn();
     const { result, unmount } = renderHook(() => useTaskEvents('task-1', onTask));

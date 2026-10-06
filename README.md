@@ -102,9 +102,10 @@ agent.run("开始另一个话题")
 `session=restored_session`。Web 服务自动保存会话检查点和任务记录；重启后选择原会话即可继续。
 旧数据库中的任务会分别迁入独立会话，并保留用户问题和最终回答；无法还原此前未保存的完整模型历史。
 
-历史采用确定性的长度裁剪，不额外调用模型生成摘要：默认最多 **160 条消息、约 64,000 字符预算**，
+历史默认保留最多 **160 条消息、约 64,000 字符预算**，
 计入文字与工具调用参数，优先保留最新用户问题与最近消息。工具调用和对应结果整体保留或移除，
-不会留下孤立结果。模型输入与持久化历史都受限；较早内容可能丢失，系统提示会明确说明历史已裁剪。
+不会留下孤立结果。移出的历史保留有界摘录；长任务模式会调用独立摘要请求保留事实、约束、决定和待办，
+摘要请求失败时退回原文片段并标注可能不完整。摘要与任务状态一起持久化，模型输入与保存历史均受限。
 这是字符预算，不是精确 token 计数，也不包含系统提示词、工具 schema 和图片开销。
 Python 调用方可通过 `ContextBuilder(max_history_chars=..., max_history_messages=...)` 调整输入预算，
 通过 Session 的同名字段调整保存预算。完整任务记录和事件仍留在 SQLite，供查看执行历史。
@@ -723,6 +724,53 @@ Python 调用方须搭配 `TextOnlyModel`，确保纯文本主模型不接收图
 
 ## 本地验证
 
+### 长任务状态、验收与恢复
+
+前端开启“长任务模式”，或在 CLI 使用 `--long-horizon`。普通模式默认 10 轮、桌面模式 50 轮；
+长任务模式默认 200 轮，每次恢复的执行轮数仍受 `--max-turns` 限制，累计轮次与执行次数保存在状态里。
+
+五项能力围绕 `TaskMemory` 共用同一状态：
+
+| 能力 | 当前实现 |
+| --- | --- |
+| Structured State | 原始目标、稳定 ID 的里程碑、验收条件、事实来源、约束、决定、当前步骤、阻塞原因和动作账本 |
+| Context Compaction | 最近历史加持久化摘要；完整语义状态单独保存，模型每轮读取有界索引，可分页获取细节 |
+| Verifier | 文件内容/哈希、命令实际退出结果、桌面可见效果和独立模型验收；完成声明之前重新核对产物 |
+| Progress Tracking | 已验收里程碑、执行次数、累计轮次、动作结果及连续无进展；重复失败达到预算后停止 |
+| Checkpoint | 输入前和结果返回后的版本化快照；Web 等 SQLite 提交确认后再执行，CLI 原子替换 JSON 快照 |
+
+长任务增加 `task_plan`、`task_progress`、`task_verify`、`task_reconcile` 和 `task_state`。
+模型不能用进度工具自行标记完成；里程碑的 `completed` 只能由独立验收写入。
+文件条件包括 `file_contains`、`file_equals`、`file_sha256`；`command_succeeded` 必须引用真实命令调用 ID，
+超时、非零退出码、读取截断或缺少证据均不能通过验收。命令退出成功只证明该命令已完成，产物条件需要另设。
+文件哈希针对工具读取的 UTF-8 文本；二进制产物应提供专门的只读验收器。
+
+```powershell
+conda run --no-capture-output -n agent python main.py --long-horizon --checkpoint-file .agent-data/my-task.json
+# 执行中断后，恢复同一目标：
+conda run --no-capture-output -n agent python main.py --resume --checkpoint-file .agent-data/my-task.json
+```
+
+CLI 长任务默认快照为 `.agent-data/cli-task.json`，保存最近一个任务；需要保留多个任务时指定不同文件。
+Web 为每个任务保存快照，停止、失败或服务重启后可点击“恢复任务”。
+`POST /api/tasks/{task_id}/resume` 携带 `expected_revision`，在同一任务和会话中继续，并递增 `attempt`；
+过期版本、已完成任务和同时运行的其他任务会被拒绝。仅支持恢复会话中的最新任务，避免较早快照覆盖后续问答；
+已有后续任务时可复制为新任务。服务重启会标记任务中断，等待用户选择恢复。
+
+恢复保留已验收步骤和未完成计划，不重新执行保存的调用。已发送但结果未持久化的动作标为 `uncertain`，
+先核实结果再继续。文件写入根据输入前保存的旧内容哈希及目标内容哈希检查：目标内容已存在则认可已生效，
+仍符合旧状态则允许重新决策执行；两者均不符则继续保持未决。任意 Shell 或外部 GUI 操作不能保证 exactly-once，
+没有可靠验收证据时会阻止继续发送有副作用的操作。插件应通过 `effect` 标记只读能力，并可提供 `recovery_probe`。
+恢复不保留旧截图编号；桌面需重新截图，恢复预算会继承，录制文件使用后续序号保留此前轨迹。
+
+Python 调用方可配置 `Agent(long_horizon=True, task_verifier=..., compactor=..., on_checkpoint=...)`，
+使用 `agent.last_checkpoint` 获取快照，再由 `agent.resume(snapshot)` 恢复。
+`on_checkpoint` 必须在可靠保存后返回；保存失败会停止后续输入。通用 Runtime 不包含 SQLite、文件系统或 Windows 操作。
+摘要和事实是历史数据，不能作为新的用户授权；这套状态用于当前任务和会话，不提供跨会话偏好记忆。
+
+离线测试 `tests/test_long_horizon.py` 与 `tests/test_durable_service.py` 覆盖保存失败、摘要回退、
+已生效/未生效写入的恢复、真实子进程退出、服务重启、版本冲突及恢复后不重复写入。
+
 桌面动作支持可选 `expected` 参数，例如点击保存时提供“未保存标记消失”；使用独立验证器检查动作前后画面。
 CLI/Web 装配的桌面 Agent 在有输入动作后、准备结束时，还会检查整个用户目标。未达到或无法确认时反馈证据继续处理，
 第二次仍无法验证成功则停止并保留验证结果。任务 `status` 与 `verification` 分开，前端显示独立的“目标已验证/尚未达到/不确定”。
@@ -767,5 +815,5 @@ OpenAI/Claude 适配器使用模拟服务响应。
 单独运行一组测试，例如 `conda run --no-capture-output -n agent python -m unittest tests.test_vision -v`。
 在 PyCharm 中也可为 `tests` 目录创建 unittest 运行配置，工作目录设为项目根目录。
 
-当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮；未实现交互式 Shell、自动加载 `AGENTS.md` 或长期记忆。
+当前实现为同步单 Agent，普通模式默认最多 10 轮、桌面模式 50 轮、长任务模式 200 轮；未实现交互式 Shell、自动加载 `AGENTS.md` 或跨会话长期记忆。
 会话已有裁剪和持久化恢复；文件和命令在本机以当前用户权限执行。

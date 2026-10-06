@@ -31,7 +31,9 @@ export function mergeTasks(previous: Task[], incoming: Task[]): Task[] {
   for (const task of incoming) {
     const existing = records.get(task.id);
     // 查询响应与 SSE 可交错，重放的 queued/running 不能覆盖已确认的终态。
-    if (!existing || priority[task.status] >= priority[existing.status]) records.set(task.id, task);
+    const newerAttempt = (task.attempt ?? 1) - (existing?.attempt ?? 1);
+    if (!existing || newerAttempt > 0 || (newerAttempt === 0 && priority[task.status] >= priority[existing.status]
+      && (task.checkpoint_revision ?? 0) >= (existing.checkpoint_revision ?? 0))) records.set(task.id, task);
   }
   return [...records.values()].sort((a, b) => b.created_at.localeCompare(a.created_at));
 }

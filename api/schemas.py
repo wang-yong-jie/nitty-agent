@@ -23,6 +23,7 @@ class RunOptions(BaseModel):
     stability_timeout: float = Field(default=3, ge=0.5, le=10)
     desktop_recovery_limit: int = Field(default=6, ge=3, le=20, strict=True)
     record_desktop: bool = False
+    long_horizon: bool = False
 
     def to_options(self) -> AgentOptions:
         return AgentOptions(**self.model_dump())
@@ -64,6 +65,48 @@ class VerificationRecord(BaseModel):
     duration_ms: float
 
 
+class MilestoneRecord(BaseModel):
+    id: str
+    title: str
+    success_criteria: str
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+    status: Literal["pending", "running", "completed", "blocked"]
+    verification: VerificationRecord | None = None
+
+
+class ActionRecord(BaseModel):
+    id: str
+    tool: str
+    fingerprint: str
+    effect: str
+    status: str
+    evidence: str | None = None
+    resolution: str | None = None
+    recovery_checks: dict[str, Any] | None = None
+    observation_hash: str | None = None
+
+
+class TaskProgress(BaseModel):
+    goal: str
+    milestones: list[MilestoneRecord]
+    facts: list[str]
+    constraints: list[str]
+    decisions: list[str]
+    current_step: str | None
+    blocked_reason: str | None
+    actions: list[ActionRecord]
+    completed_actions: int
+    last_progress_turn: int
+    no_progress_turns: int
+    verification_attempts: int
+    attempt: int
+
+
+class TaskResume(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1, strict=True)
+
+
 class TaskRecord(BaseModel):
     id: str
     session_id: str | None = None
@@ -80,6 +123,10 @@ class TaskRecord(BaseModel):
     turn: int
     stop_reason: str | None
     verification: VerificationRecord | None = None
+    progress: TaskProgress | None = None
+    checkpoint_revision: int = 0
+    resume_available: bool = False
+    attempt: int = 1
 
 
 class SessionCreate(BaseModel):
@@ -95,6 +142,8 @@ class SessionRecord(BaseModel):
     options: RunOptions | None
     working_directory: str | None
     omitted_messages: int
+    summary_mode: Literal["none", "semantic", "extractive"] = "none"
+    compaction_runs: int = 0
 
 
 class SessionDeleteResult(BaseModel):

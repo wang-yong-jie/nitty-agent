@@ -26,11 +26,13 @@ const makeTask = (): Task => ({
   id: 'task-1', session_id: 'session-1', task: '读取项目说明', options: defaultOptions as Task['options'], status: 'running',
   created_at: '2026-10-04T10:00:00Z', started_at: '2026-10-04T10:00:00Z', finished_at: null,
   answer: null, error: null, error_info: null, run_id: null, turn: 0, stop_reason: null,
+  checkpoint_revision: 0, resume_available: false, attempt: 1,
 });
 
 const makeSession = (id = 'session-1'): Session => ({
   id, title: '读取项目说明', created_at: '2026-10-04T10:00:00Z', updated_at: '2026-10-04T10:00:00Z',
   options: defaultOptions as Task['options'], working_directory: null, omitted_messages: 0,
+  summary_mode: 'none', compaction_runs: 0,
 });
 
 beforeEach(() => {
@@ -52,6 +54,39 @@ beforeEach(() => {
 });
 
 describe('控制台完整交互', () => {
+  it('已有后续问答时隐藏旧任务的恢复入口，详情中的入口不可用', async () => {
+    const failed = { ...makeTask(), status: 'failed', error: '旧任务中断', resume_available: true, checkpoint_revision: 8 } as Task;
+    const later = { ...makeTask(), id: 'task-2', task: '后续问题', status: 'completed', answer: '后续答案',
+      created_at: '2026-10-04T11:00:00Z' } as Task;
+    history.replaceState(null, '', '/?task=task-1');
+    get.mockImplementation((path: string) => Promise.resolve({ data: path === '/api/capabilities'
+      ? { providers: { deepseek: true }, desktop_available: true }
+      : path === '/api/sessions' ? [makeSession()] : [failed, later] }));
+    render(<AntApp><App /></AntApp>);
+    await screen.findByText('后续答案');
+    expect(screen.queryByRole('button', { name: '恢复任务' })).toBeNull();
+    await userEvent.click(screen.getAllByRole('button', { name: '查看此次详细执行过程' })[0]);
+    expect((await screen.findByRole('button', { name: '恢复任务' })).hasAttribute('disabled')).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('恢复按钮提交快照版本，并在同一会话展示新一轮执行', async () => {
+    const failed = { ...makeTask(), status: 'failed', error: '执行进程意外退出。', resume_available: true,
+      checkpoint_revision: 8, options: { ...defaultOptions, long_horizon: true } } as Task;
+    history.replaceState(null, '', '/?task=task-1');
+    get.mockImplementation((path: string) => Promise.resolve({ data: path === '/api/capabilities'
+      ? { providers: { deepseek: true }, desktop_available: true }
+      : path === '/api/sessions' ? [makeSession()] : [failed] }));
+    post.mockResolvedValue({ data: { ...failed, status: 'running', attempt: 2, resume_available: false, error: null } });
+    render(<AntApp><App /></AntApp>);
+    await userEvent.click(await screen.findByRole('button', { name: '恢复任务' }));
+    expect(post).toHaveBeenCalledWith('/api/tasks/{task_id}/resume', { params: { path: { task_id: 'task-1' } },
+      body: { expected_revision: 8 } });
+    await screen.findByRole('button', { name: '停止任务' });
+    expect(location.search).toContain('task=task-1');
+    expect(Source.instances.length).toBeGreaterThan(1);
+  });
+
   it('桌面任务提交截图记录、稳定等待与恢复预算配置', async () => {
     render(<AntApp><App /></AntApp>);
     const input = await screen.findByRole('textbox', { name: '任务描述' });

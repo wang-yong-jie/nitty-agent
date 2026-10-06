@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from contracts import ErrorInfo, Message, Observation
+from core.task_memory import TaskMemory
 
 
 @dataclass
@@ -24,3 +25,5 @@ class AgentState:
     session_id: str | None = None
     omitted_messages: int = 0
     verification: dict | None = None
+    memory: TaskMemory | None = None
+    context_summary: str = ""

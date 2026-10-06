@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Task, TaskEvent } from '../api/client';
 
-export function useTaskEvents(taskId: string | null, onTask: (task: Task) => void) {
+export function useTaskEvents(taskId: string | null, onTask: (task: Task) => void, attempt = 1) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'reconnecting' | 'closed'>('closed');
 
@@ -25,7 +25,7 @@ export function useTaskEvents(taskId: string | null, onTask: (task: Task) => voi
     });
     source.addEventListener('stream_end', () => { if (!disposed) { source.close(); setConnection('closed'); } });
     return () => { disposed = true; source.close(); };
-  }, [taskId, onTask]);
+  }, [taskId, onTask, attempt]);
 
   return { events, connection };
 }

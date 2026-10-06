@@ -143,6 +143,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{task_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Task */
+        post: operations["resume_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks/{task_id}/events": {
         parameters: {
             query?: never;
@@ -181,6 +198,29 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** ActionRecord */
+        ActionRecord: {
+            /** Id */
+            id: string;
+            /** Tool */
+            tool: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Effect */
+            effect: string;
+            /** Status */
+            status: string;
+            /** Evidence */
+            evidence?: string | null;
+            /** Resolution */
+            resolution?: string | null;
+            /** Recovery Checks */
+            recovery_checks?: {
+                [key: string]: unknown;
+            } | null;
+            /** Observation Hash */
+            observation_hash?: string | null;
+        };
         /** ApiError */
         ApiError: {
             /** Detail */
@@ -227,6 +267,25 @@ export interface components {
             side_effects: "none" | "possible";
             /** Exception Type */
             exception_type?: string | null;
+        };
+        /** MilestoneRecord */
+        MilestoneRecord: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Success Criteria */
+            success_criteria: string;
+            /** Checks */
+            checks?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "completed" | "blocked";
+            verification?: components["schemas"]["VerificationRecord"] | null;
         };
         /** RunOptions */
         RunOptions: {
@@ -286,6 +345,11 @@ export interface components {
              * @default false
              */
             record_desktop: boolean;
+            /**
+             * Long Horizon
+             * @default false
+             */
+            long_horizon: boolean;
         };
         /** SessionCreate */
         SessionCreate: {
@@ -319,6 +383,17 @@ export interface components {
             working_directory: string | null;
             /** Omitted Messages */
             omitted_messages: number;
+            /**
+             * Summary Mode
+             * @default none
+             * @enum {string}
+             */
+            summary_mode: "none" | "semantic" | "extractive";
+            /**
+             * Compaction Runs
+             * @default 0
+             */
+            compaction_runs: number;
         };
         /** TaskCreate */
         TaskCreate: {
@@ -338,6 +413,35 @@ export interface components {
             data: {
                 [key: string]: unknown;
             };
+        };
+        /** TaskProgress */
+        TaskProgress: {
+            /** Goal */
+            goal: string;
+            /** Milestones */
+            milestones: components["schemas"]["MilestoneRecord"][];
+            /** Facts */
+            facts: string[];
+            /** Constraints */
+            constraints: string[];
+            /** Decisions */
+            decisions: string[];
+            /** Current Step */
+            current_step: string | null;
+            /** Blocked Reason */
+            blocked_reason: string | null;
+            /** Actions */
+            actions: components["schemas"]["ActionRecord"][];
+            /** Completed Actions */
+            completed_actions: number;
+            /** Last Progress Turn */
+            last_progress_turn: number;
+            /** No Progress Turns */
+            no_progress_turns: number;
+            /** Verification Attempts */
+            verification_attempts: number;
+            /** Attempt */
+            attempt: number;
         };
         /** TaskRecord */
         TaskRecord: {
@@ -371,6 +475,27 @@ export interface components {
             /** Stop Reason */
             stop_reason: string | null;
             verification?: components["schemas"]["VerificationRecord"] | null;
+            progress?: components["schemas"]["TaskProgress"] | null;
+            /**
+             * Checkpoint Revision
+             * @default 0
+             */
+            checkpoint_revision: number;
+            /**
+             * Resume Available
+             * @default false
+             */
+            resume_available: boolean;
+            /**
+             * Attempt
+             * @default 1
+             */
+            attempt: number;
+        };
+        /** TaskResume */
+        TaskResume: {
+            /** Expected Revision */
+            expected_revision: number;
         };
         /** VerificationRecord */
         VerificationRecord: {
@@ -1176,6 +1301,86 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRecord"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    resume_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskResume"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

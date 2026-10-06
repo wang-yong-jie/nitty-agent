@@ -81,10 +81,12 @@ class TaskManager:
             self.store.save_session_history(pending.to_dict(), record["options"],
                                             record["task"][:80] if not history["messages"] else None)
             cancel = self.context.Event()
+            checkpoint_ack = self.context.Event()
             channel = self.context.Queue()
             process = self.context.Process(
                 target=self.worker_target,
                 args=(task_id, record["task"], options, cancel, channel, str(self.trace_dir / f"{task_id}.trace.jsonl"), history),
+                kwargs={"checkpoint_ack": checkpoint_ack},
                 name=f"agent-{task_id[:8]}",
             )
             try:
@@ -98,11 +100,48 @@ class TaskManager:
             self.active_id, self.process, self.cancel = task_id, process, cancel
             record.update(status="running", started_at=now())
             self._save_status(record)
-            self.monitor = threading.Thread(target=self._monitor, args=(task_id, process, channel), daemon=True)
+            self.monitor = threading.Thread(target=self._monitor, args=(task_id, process, channel, checkpoint_ack), daemon=True)
             self.monitor.start()
             return record
 
-    def _monitor(self, task_id, process, channel):
+    def resume(self, task_id, expected_revision):
+        with self.lock:
+            if self.closed or self.active_id is not None:
+                raise TaskBusy("已有任务正在执行或服务正在关闭。")
+            record = self.store.get(task_id)
+            if record["status"] in ACTIVE or record["status"] == "completed":
+                raise ValueError("只有已中断、停止或失败的任务可以恢复。")
+            later = [item for item in self.store.session_tasks(record["session_id"])
+                     if item["created_at"] > record["created_at"]]
+            if later:
+                raise TaskBusy("此会话已有后续任务；只能恢复会话中的最新任务，以保留后续问答上下文。")
+            revision, checkpoint = self.store.checkpoint(task_id)
+            if revision != expected_revision:
+                raise TaskBusy("执行快照已更新，请刷新任务后重试。")
+            from core.checkpoint import restore
+            restored = restore(checkpoint)
+            options = AgentOptions(**record["options"])
+            options = replace(options, long_horizon=True, workdir=options.workdir or checkpoint["session"].get("working_directory"))
+            cancel, checkpoint_ack, channel = self.context.Event(), self.context.Event(), self.context.Queue()
+            attempt = restored.memory.attempt
+            process = self.context.Process(target=self.worker_target,
+                args=(task_id, record["task"], options, cancel, channel,
+                      str(self.trace_dir / f"{task_id}.attempt-{attempt}.trace.jsonl"), checkpoint["session"]),
+                kwargs={"checkpoint_data": checkpoint, "checkpoint_ack": checkpoint_ack}, name=f"agent-{task_id[:8]}")
+            try:
+                process.start()
+            except Exception:
+                channel.close()
+                raise
+            self.active_id, self.process, self.cancel = task_id, process, cancel
+            record.update(status="running", started_at=now(), finished_at=None, answer=None, error=None, error_info=None,
+                          stop_reason=None, attempt=attempt, resume_available=False, options=asdict(options))
+            self._save_status(record)
+            self.monitor = threading.Thread(target=self._monitor, args=(task_id, process, channel, checkpoint_ack), daemon=True)
+            self.monitor.start()
+            return record
+
+    def _monitor(self, task_id, process, channel, checkpoint_ack=None):
         outcome = None
         try:
             while True:
@@ -122,6 +161,10 @@ class TaskManager:
                     if message["data"]["id"] != session_id:
                         raise ValueError("工作进程返回的会话 ID 不匹配。")
                     self.store.save_session_history(message["data"])
+                elif message["type"] == "checkpoint":
+                    self.store.save_checkpoint(task_id, message["data"], now())
+                    if checkpoint_ack is not None:
+                        checkpoint_ack.set()
             process.join()
             if outcome is None or process.exitcode != 0:
                 outcome = dict(status="failed", answer=None, error="执行进程意外退出。",
@@ -195,6 +238,10 @@ class TaskManager:
                     if trace_path.resolve().parent != trace_root:
                         raise ValueError("日志路径超出日志目录。")
                     trace_path.unlink(missing_ok=True)
+                    for attempt_trace in trace_root.glob(f"{task_id}.attempt-*.trace.jsonl"):
+                        if attempt_trace.resolve().parent != trace_root:
+                            raise ValueError("恢复日志路径超出日志目录。")
+                        attempt_trace.unlink()
                     artifact_dir = trace_root / f"{task_id}.frames"
                     if artifact_dir.exists():
                         if artifact_dir.resolve().parent != trace_root or artifact_dir.is_symlink():

@@ -1,7 +1,7 @@
 """命令行入口；与 Web 工作进程共用 bootstrap 的配置和装配。"""
 
 import argparse
-from dataclasses import replace
+from dataclasses import replace, asdict
 import json
 from pathlib import Path
 from contextlib import ExitStack
@@ -9,7 +9,8 @@ from contextlib import ExitStack
 from bootstrap import AgentOptions, PROVIDER_KEYS, ROOT, agent_session, model_settings
 from contracts import AgentCancelled
 from core.session import Session
-from tracing import JsonlTrace
+from tracing import JsonlTrace, LogRedactor
+from core.checkpoint import save_file
 
 
 def main() -> None:
@@ -24,11 +25,14 @@ def main() -> None:
     parser.add_argument("--vision-model", help="分离模式的视觉模型名称，也可设置 VISION_MODEL")
     parser.add_argument("--vision-base-url", help="VLM 服务根地址，也可设置 VISION_BASE_URL")
     parser.add_argument("--with-local-tools", action="store_true", help="桌面模式同时提供文件和 Shell 工具")
-    parser.add_argument("--max-turns", type=int, help="模型轮次上限；普通模式 10，桌面模式 50")
+    parser.add_argument("--max-turns", type=int, help="模型轮次上限；普通模式 10，桌面模式 50，长任务模式 200")
     parser.add_argument("--screenshot-size", type=int, default=1600, help="截图最长边，640～3840；默认 1600")
     parser.add_argument("--stability-timeout", type=float, default=3, help="界面稳定检测上限，0.5～10 秒")
     parser.add_argument("--desktop-recovery-limit", type=int, default=6, help="连续无进展动作预算，3～20")
     parser.add_argument("--record-desktop", action="store_true", help="保存动作前后截图与点击标记到本机运行日志目录")
+    parser.add_argument("--long-horizon", action="store_true", help="启用里程碑、独立验收和语义摘要")
+    parser.add_argument("--checkpoint-file", type=Path, help="执行快照路径；长任务默认 .agent-data/cli-task.json")
+    parser.add_argument("--resume", action="store_true", help="恢复执行快照中的原任务，先核实未决操作")
     parser.add_argument("--trace-file", help="JSONL 日志路径；新建文件，不覆盖已有文件")
     parser.add_argument("--trace-strict", action="store_true", help="日志写入失败时停止任务；需与 --trace-file 一起使用")
     parser.add_argument("--chat", action="store_true", help="连续会话；/new 新建会话，/exit 退出")
@@ -37,8 +41,20 @@ def main() -> None:
     args = parser.parse_args()
     if args.trace_strict and not args.trace_file:
         parser.error("--trace-strict 需与 --trace-file 一起使用。")
+    if args.resume and (args.new_session or args.chat):
+        parser.error("--resume 不能与 --new-session 或 --chat 一起使用。")
     options = AgentOptions(**{key: value for key, value in vars(args).items()
-                              if key not in ("trace_file", "trace_strict", "chat", "session_file", "new_session")})
+                              if key not in ("trace_file", "trace_strict", "chat", "session_file", "new_session", "checkpoint_file", "resume")})
+    checkpoint_file = args.checkpoint_file or (ROOT / ".agent-data" / "cli-task.json" if args.long_horizon or args.resume else None)
+    checkpoint = None
+    if args.resume:
+        if not checkpoint_file.is_file():
+            parser.error("找不到执行快照文件。")
+        checkpoint = json.loads(checkpoint_file.read_text(encoding="utf-8"))
+        from core.checkpoint import restore
+        restore(checkpoint)
+        options = replace(AgentOptions(**checkpoint.get("options", asdict(options))), long_horizon=True,
+                          workdir=checkpoint["session"].get("working_directory") or options.workdir)
     try:
         model_settings(options)
     except ValueError as error:
@@ -61,10 +77,13 @@ def main() -> None:
     if args.new_session:
         save_conversation(conversation)
 
-    try:
-        task = input("请输入任务：").strip()
-    except EOFError:
-        return
+    if checkpoint:
+        task = checkpoint["task"]
+    else:
+        try:
+            task = input("请输入任务：").strip()
+        except EOFError:
+            return
     if not task:
         print("任务为空，已退出。")
         return
@@ -73,6 +92,10 @@ def main() -> None:
         session = stack.enter_context(agent_session(options, trace=trace, trace_strict=args.trace_strict))
         session.agent.runtime.session = conversation
         session.agent.runtime.on_session_update = save_conversation
+        if checkpoint_file:
+            def persist_checkpoint(data):
+                save_file(checkpoint_file, LogRedactor().clean({**data, "options": asdict(options)}))
+            session.agent.runtime.on_checkpoint = persist_checkpoint
         if options.desktop:
             print("[桌面模式] 操作主显示器；F8 或鼠标移至主屏幕角落停止后续操作，终端 Ctrl+C 中止。")
             print(f"[视觉模式] {options.vision_mode}")
@@ -89,7 +112,8 @@ def main() -> None:
             else:
                 try:
                     session.prepare()
-                    answer = session.agent.run(task)
+                    answer = session.agent.resume(checkpoint) if checkpoint else session.agent.run(task)
+                    checkpoint = None
                     print(f"\n[最终回答]\n{answer}")
                 except (AgentCancelled, KeyboardInterrupt):
                     print("\n[已中止] 用户停止了任务。")
