@@ -1,6 +1,7 @@
 """版本化的执行快照；不包含图片编码，不自动重放工具。"""
 
 from dataclasses import asdict
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -32,7 +33,8 @@ def snapshot(state, session, phase, extensions=None):
             "memory": state.memory.to_dict(), "messages": messages_to_data(bounded),
             "session": session.to_dict(), "verification": state.verification,
             "observations": [{**asdict(item), "images": []} for item in state.observations[-100:]],
-            "extensions": extensions or {}}
+            "extensions": extensions or {},
+            "skills": {"schema_version": 1, "active": deepcopy(state.active_skills), "resources": deepcopy(state.skill_resources)}}
 
 
 def restore(data, *, resuming=True):
@@ -57,6 +59,10 @@ def restore(data, *, resuming=True):
         memory.restore_actions()
     from core.session import complete_history
     observations = []
+    skills = data.get("skills", {"schema_version": 1, "active": [], "resources": []})
+    if (not isinstance(skills, dict) or type(skills.get("schema_version")) is not int or skills["schema_version"] != 1
+            or not isinstance(skills.get("active"), list) or not isinstance(skills.get("resources"), list)):
+        raise ValueError("Skill 执行快照结构或版本无效。")
     for item in data.get("observations", []):
         values = {**item, "images": []}
         if values.get("error_info"):
@@ -64,7 +70,7 @@ def restore(data, *, resuming=True):
         observations.append(Observation(**values))
     return AgentState(task=data["task"], session_id=data["session_id"], turn=data["turn"], memory=memory,
                       messages=complete_history(messages_from_data(data["messages"])), observations=observations,
-                      verification=data.get("verification"))
+                      verification=data.get("verification"), active_skills=deepcopy(skills["active"]), skill_resources=deepcopy(skills["resources"]))
 
 
 def save_file(path, data):

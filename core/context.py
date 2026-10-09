@@ -42,6 +42,8 @@ class ContextBuilder:
                             json.dumps(state.memory.context(), ensure_ascii=False))
         # 规则随工具注册；共享规则按首次出现的顺序去重，不依赖具体工具名称。
         sections.extend(dict.fromkeys(tool.instructions for tool in tools if tool.instructions))
+        if state.skill_context:
+            sections.append(state.skill_context)
         bounded, omitted = trim_history(state.messages, self.max_history_chars, self.max_history_messages)
         if omitted or state.omitted_messages:
             sections.append("部分较早的会话历史已按长度预算裁剪；缺失信息不能凭空补全，必要时询问用户或重新读取。")

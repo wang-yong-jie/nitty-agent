@@ -65,6 +65,10 @@ class ToolRegistry:
         """只把描述交给模型，真实执行函数不会发送给模型。"""
         return [deepcopy(tool.spec) for tool in self._tools.values()]
 
+    def unregister(self, name: str) -> None:
+        """在新任务装配时撤销可选工具；未知名称保持幂等。"""
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> RegisteredTool:
         """查找实现；未知工具会在 Executor 边界转成错误反馈。"""
         return self._tools[name]

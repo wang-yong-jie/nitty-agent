@@ -31,6 +31,7 @@ class AgentRuntime:
         completion_check=None, on_run_start=None, on_observation=None,
         long_horizon=False, task_verifier=None, desktop_verifier=None, compactor=None,
         on_checkpoint=None, snapshot_extension=None, restore_extension=None,
+        skills=None,
     ):
         if type(max_turns) is not int or max_turns < 1:
             raise ValueError("max_turns 必须是正整数。")
@@ -57,6 +58,7 @@ class AgentRuntime:
         self.on_checkpoint = on_checkpoint
         self.snapshot_extension, self.restore_extension = snapshot_extension, restore_extension
         self.last_checkpoint = None
+        self.skills = skills
         self.checkpoint_phase = "setup"
         self.controller = TaskController(self, task_verifier, desktop_verifier)
         self.control_registered = False
@@ -145,6 +147,12 @@ class AgentRuntime:
             self.logger.start(config=self.run_config, max_turns=self.max_turns,
                               tools=[spec.name for spec in self.registry.specs()],
                               model={"adapter": type(self.model).__name__})
+            phase = "skills"
+            if self.skills is not None:
+                self.skills.prepare(state, self.registry, restoring=checkpoint is not None, emit=self.logger.emit)
+                self._checkpoint(state)
+            elif state.active_skills or state.skill_resources:
+                raise ValueError("此任务包含 Skill 激活记录，但当前 Runtime 没有配置 SkillManager。")
             getter = getattr(self.model, "get_info", None)
             if callable(getter):
                 self.logger.emit("model_configured", model=getter())
@@ -162,6 +170,7 @@ class AgentRuntime:
                 # Context 用最新环境快照和历史组装输入，Adapter 做协议转换。
                 phase = "context"
                 environment_info = self.environment.get_info()
+                state.skill_context = self.skills.context() if self.skills is not None else ""
                 messages = self.context.build_messages(state, environment_info, specs)
                 self.logger.emit("context_built", turn=turn, environment=environment_info,
                                  message_count=len(messages), image_count=sum(len(message.images) for message in messages))

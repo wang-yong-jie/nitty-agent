@@ -3,6 +3,34 @@
 使用 Python 3.12。默认模型为 DeepSeek `deepseek-flash`，接口采用 OpenAI 兼容格式。
 架构为 **单 Agent + 模块化 Runtime + 可插拔 Model / Tool / Environment**。
 
+## 可插拔 Skill
+
+已支持本地 `SKILL.md` 知识包：新任务发现目录，模型按需激活，完整指导独立于历史裁剪保存，并在中断恢复时核对包版本。
+可通过 `activate_skill`、`read_skill_resource`、`deactivate_skill` 使用；脚本不会因加载 Skill 自动执行。
+
+默认扫描用户 `~/.nitty-agent/skills` 与本项目 `.agents/skills`。额外可信目录和禁用列表见 `.env.example`。
+新增或修改包在下一次任务生效；修改 `.env` 后重启服务。任务工作目录不自动加入搜索范围。
+
+内置 `complex-task` 需要长任务模式：
+
+```powershell
+conda run --no-capture-output -n agent python main.py --long-horizon --skill complex-task --chat
+```
+
+`--skill` 为每次新任务显式选择 Skill，可重复传入；省略时由模型按任务选择。Web 任务框启用长任务模式后，也可以显式指定：
+
+```text
+/skill complex-task
+整理指定资料，输出结果并核对数量。
+```
+
+CLI 使用 `--skill`，多行指令使用 Web 或 Python `agent.run()`；恢复任务使用原快照中的 Skill，`--resume` 不与 `--skill` 混用。
+普通文件/Shell 或桌面模式下缺少依赖的 Skill 不显示。
+Skill 提供做事方法，浏览器与 MCP 工具仍需另行接入。
+
+完整思路、格式、接口、限额和恢复约定见 [Skill 设计](docs/skills-design.md)。重大改动和后续迭代记录统一收录在
+[设计与迭代索引](docs/README.md)，维护要求见 `AGENTS.md`。
+
 ## 本地浏览器控制台
 
 新增 React + TypeScript + Vite + Ant Design 前端与 FastAPI 本地服务。

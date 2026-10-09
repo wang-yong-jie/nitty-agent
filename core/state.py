@@ -27,3 +27,6 @@ class AgentState:
     verification: dict | None = None
     memory: TaskMemory | None = None
     context_summary: str = ""
+    active_skills: list[dict] = field(default_factory=list)
+    skill_resources: list[dict] = field(default_factory=list)
+    skill_context: str = ""  # 每轮由 SkillManager 重建，不作为普通历史保存。

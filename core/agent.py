@@ -25,13 +25,14 @@ class Agent:
         completion_check=None, on_run_start=None, on_observation=None,
         long_horizon=False, task_verifier=None, desktop_verifier=None, compactor=None,
         on_checkpoint=None, snapshot_extension=None, restore_extension=None,
+        skills=None,
     ):
         self.runtime = AgentRuntime(model, registry, environment, context, max_turns, verbose, cancel_check, trace,
                                     trace_strict=trace_strict, run_config=run_config,
                                     completion_check=completion_check, on_run_start=on_run_start,
                                     on_observation=on_observation, long_horizon=long_horizon, task_verifier=task_verifier,
                                     desktop_verifier=desktop_verifier, compactor=compactor, on_checkpoint=on_checkpoint,
-                                    snapshot_extension=snapshot_extension, restore_extension=restore_extension)
+                                    snapshot_extension=snapshot_extension, restore_extension=restore_extension, skills=skills)
         self.runtime.session = session if session is not None else Session()
         self.runtime.on_session_update = on_session_update
 

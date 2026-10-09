@@ -18,6 +18,7 @@ from adapters.windows_apps import WindowsApplicationCatalog
 from contracts import EventSink, ModelAdapter
 from core.agent import Agent
 from core.tooling import ToolRegistry
+from core.skills import SkillManager, configured_catalog
 from tools.applications import register_application_tools
 from tools.desktop import register_desktop_tools
 from tools.local import create_default_registry
@@ -173,6 +174,7 @@ def agent_session(options: AgentOptions, *, trace: EventSink | None = None,
             desktop_verifier=(lambda expected: workflow.verify(expected, scope="task").data["verification"]) if workflow else None,
             compactor=ModelCompactor(model) if options.long_horizon else None,
             snapshot_extension=workflow.snapshot if workflow else None, restore_extension=workflow.restore if workflow else None,
+            skills=SkillManager(configured_catalog(ROOT)),
             run_config={
                 "mode": "desktop" if options.desktop else "local",
                 "vision_mode": options.vision_mode if options.desktop else None,

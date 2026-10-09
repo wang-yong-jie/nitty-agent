@@ -11,6 +11,7 @@ from contracts import AgentCancelled
 from core.session import Session
 from tracing import JsonlTrace, LogRedactor
 from core.checkpoint import save_file
+from core.skills import NAME as SKILL_NAME
 
 
 def main() -> None:
@@ -31,6 +32,7 @@ def main() -> None:
     parser.add_argument("--desktop-recovery-limit", type=int, default=6, help="连续无进展动作预算，3～20")
     parser.add_argument("--record-desktop", action="store_true", help="保存动作前后截图与点击标记到本机运行日志目录")
     parser.add_argument("--long-horizon", action="store_true", help="启用里程碑、独立验收和语义摘要")
+    parser.add_argument("--skill", action="append", default=[], help="每次新任务显式使用指定 Skill；可重复传入")
     parser.add_argument("--checkpoint-file", type=Path, help="执行快照路径；长任务默认 .agent-data/cli-task.json")
     parser.add_argument("--resume", action="store_true", help="恢复执行快照中的原任务，先核实未决操作")
     parser.add_argument("--trace-file", help="JSONL 日志路径；新建文件，不覆盖已有文件")
@@ -39,12 +41,16 @@ def main() -> None:
     parser.add_argument("--session-file", type=Path, help="会话历史 JSON 路径；存在时恢复，--chat 默认保存在 .agent-data/cli-session.json")
     parser.add_argument("--new-session", action="store_true", help="开始新会话，不继承已有会话文件")
     args = parser.parse_args()
+    if any(len(name) > 64 or not SKILL_NAME.fullmatch(name) for name in args.skill):
+        parser.error("--skill 需要有效的 Skill 名称。")
+    if args.resume and args.skill:
+        parser.error("--resume 使用快照中原有 Skill，不能同时指定 --skill。")
     if args.trace_strict and not args.trace_file:
         parser.error("--trace-strict 需与 --trace-file 一起使用。")
     if args.resume and (args.new_session or args.chat):
         parser.error("--resume 不能与 --new-session 或 --chat 一起使用。")
     options = AgentOptions(**{key: value for key, value in vars(args).items()
-                              if key not in ("trace_file", "trace_strict", "chat", "session_file", "new_session", "checkpoint_file", "resume")})
+                              if key not in ("trace_file", "trace_strict", "chat", "session_file", "new_session", "checkpoint_file", "resume", "skill")})
     checkpoint_file = args.checkpoint_file or (ROOT / ".agent-data" / "cli-task.json" if args.long_horizon or args.resume else None)
     checkpoint = None
     if args.resume:
@@ -112,7 +118,8 @@ def main() -> None:
             else:
                 try:
                     session.prepare()
-                    answer = session.agent.resume(checkpoint) if checkpoint else session.agent.run(task)
+                    run_task = "\n".join([*(f"/skill {name}" for name in args.skill), task])
+                    answer = session.agent.resume(checkpoint) if checkpoint else session.agent.run(run_task)
                     checkpoint = None
                     print(f"\n[最终回答]\n{answer}")
                 except (AgentCancelled, KeyboardInterrupt):
